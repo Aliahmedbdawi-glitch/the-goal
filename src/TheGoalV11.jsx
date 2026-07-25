@@ -482,7 +482,6 @@ export default function TheGoalApp() {
                 </span>
                 <span style={{ color: T.muted, fontSize: 14 }}>pts</span>
               </div>
-              {atRisk > 0 && <div style={{ color: T.red, fontSize: 11.5, marginTop: 6, display: "flex", alignItems: "center", gap: 4 }}><AlertTriangle size={11} /> −{atRisk} at risk</div>}
             </div>
             <div style={{ textAlign: "right" }}>
               <div style={{ color: T.text, fontSize: 14, fontWeight: 500 }}>{goal.name}</div>
@@ -502,13 +501,6 @@ export default function TheGoalApp() {
               </div>
               <button onClick={() => setModal({ type: "task" })} style={{ background: T.blue, color: "#04101F", border: "none", borderRadius: 11, padding: "9px 14px", fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}><Plus size={16} /> Add</button>
             </div>
-
-            {atRisk > 0 && (
-              <div style={{ display: "flex", alignItems: "center", gap: 9, background: "rgba(255,107,107,.09)", border: "1px solid rgba(255,107,107,.3)", borderRadius: 12, padding: "10px 13px", marginBottom: 16 }}>
-                <AlertTriangle size={16} color={T.red} />
-                <span style={{ color: T.redHi, fontSize: 12.5, lineHeight: 1.4 }}>−{atRisk} pts will be charged at day close for unmet DOs.</span>
-              </div>
-            )}
 
             {["do", "better", "dont"].map((k) => (
               <Group key={k} kind={k} tasks={gToday.filter((t) => t.kind === k)} onApply={applyTask} onEdit={(t) => setModal({ type: "task", payload: t })} />
@@ -590,7 +582,6 @@ function Group({ kind, tasks, onApply, onEdit }) {
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
         <span style={{ width: 7, height: 7, borderRadius: 4, background: meta.tint, boxShadow: `0 0 8px ${meta.tint}` }} />
         <span style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>{meta.label}</span>
-        <span style={{ color: T.dim, fontSize: 11.5 }}>· {meta.note}</span>
       </div>
       {tasks.length === 0 && <div style={{ color: T.dim, fontSize: 13, padding: "2px 2px 6px" }}>Nothing due today.</div>}
       {tasks.map((t) => <Row key={t.id} t={t} onApply={onApply} onEdit={onEdit} />)}
@@ -607,9 +598,8 @@ function Row({ t, onApply, onEdit }) {
   const active = val !== 0;
   const negKind = t.kind === "dont";
   const m = minOf(t);
-  const short = shortfall(t);
   const weekly = t.sched === "custom" && (t.custom || {}).mode === "timesWk";
-  const border = short > 0 ? "rgba(255,107,107,.4)" : active ? (val < 0 ? "rgba(255,107,107,.45)" : "rgba(59,156,255,.3)") : T.cardLine;
+  const border = active ? (val < 0 ? "rgba(255,107,107,.45)" : "rgba(59,156,255,.3)") : T.cardLine;
   const hasNote = !!(t.note && t.note.trim());
   const isLongNote = hasNote && (t.note.length > 110 || t.note.includes("\n") || !!t.richContent);
 
@@ -624,7 +614,7 @@ function Row({ t, onApply, onEdit }) {
         {t.mode === "repeat" && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
             <button onClick={() => onApply(t, { countToday: Math.max(0, (t.countToday || 0) - 1) })} style={rndBtn}><Minus size={14} color={T.muted} /></button>
-            <span style={{ color: (t.countToday || 0) > 0 ? (short > 0 ? T.redHi : meta.tint) : T.dim, fontSize: 16, fontWeight: 700, minWidth: m ? 34 : 16, textAlign: "center" }}>
+            <span style={{ color: (t.countToday || 0) > 0 ? meta.tint : T.dim, fontSize: 16, fontWeight: 700, minWidth: m ? 34 : 16, textAlign: "center" }}>
               {t.countToday || 0}{m ? <span style={{ color: T.dim, fontSize: 12, fontWeight: 600 }}>/{m}</span> : null}
             </span>
             <button onClick={() => onApply(t, { countToday: (t.countToday || 0) + 1 })} style={{ ...rndBtn, borderColor: meta.tint }}><Plus size={14} color={meta.tint} /></button>
@@ -660,27 +650,16 @@ function Row({ t, onApply, onEdit }) {
       </div>
 
       {hasNote && (
-        <button onClick={() => (isLongNote ? setNoteOpen(true) : onEdit(t))} style={{ display: "flex", alignItems: "flex-start", gap: 7, marginTop: 10, background: "rgba(255,255,255,.03)", border: `1px solid ${T.cardLine}`, borderRadius: 10, padding: "8px 10px", width: "100%", textAlign: "left", cursor: "pointer" }}>
-          <Quote size={12} color={T.dim} style={{ marginTop: 2, flexShrink: 0 }} />
+        <button onClick={() => (isLongNote ? setNoteOpen(true) : onEdit(t))} style={{ display: "flex", alignItems: "flex-start", gap: 5, marginTop: 6, background: "rgba(255,255,255,.03)", border: `1px solid ${T.cardLine}`, borderRadius: 8, padding: "5px 8px", width: "100%", textAlign: "left", cursor: "pointer" }}>
+          <Quote size={10} color={T.dim} style={{ marginTop: 1, flexShrink: 0 }} />
           <span style={{ flex: 1, minWidth: 0 }}>
-            <span style={{ color: T.muted, fontSize: 12, fontStyle: "italic", lineHeight: 1.45, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{t.note}</span>
-            {isLongNote && <span style={{ display: "block", color: T.blueHi, fontSize: 11, fontWeight: 600, marginTop: 3, fontStyle: "normal" }}>Read in full →</span>}
+            <span style={{ color: T.muted, fontSize: 10.5, fontStyle: "italic", lineHeight: 1.35, display: "-webkit-box", WebkitLineClamp: 1, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{t.note}</span>
+            {isLongNote && <span style={{ display: "block", color: T.blueHi, fontSize: 10, fontWeight: 600, marginTop: 2, fontStyle: "normal" }}>Read in full →</span>}
           </span>
         </button>
       )}
 
       {noteOpen && <NoteModal task={t} onClose={() => setNoteOpen(false)} onEdit={() => { setNoteOpen(false); onEdit(t); }} />}
-
-      {m > 0 && (
-        <div style={{ marginTop: 10 }}>
-          <div style={{ height: 4, background: "rgba(255,255,255,.08)", borderRadius: 3, overflow: "hidden" }}>
-            <div style={{ width: `${clamp01((t.countToday || 0) / m) * 100}%`, height: "100%", background: short > 0 ? T.red : T.green, transition: "width .3s, background .3s" }} />
-          </div>
-          <div style={{ color: short > 0 ? T.red : T.green, fontSize: 11, marginTop: 5 }}>
-            {short > 0 ? `${short} more or −${shortPts(t)} pts at day close` : "Minimum reached"}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -1322,16 +1301,6 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
         {mode === "count" && <div style={{ flex: 1 }}><Field label="Unit"><input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="min, page, rep" style={inp} /></Field></div>}
         {showMin && <div style={{ flex: 1 }}><Field label="Minimum per day"><input value={minCount} onChange={(e) => setMinCount(e.target.value.replace(/\D/g, ""))} inputMode="numeric" placeholder="0 = none" style={inp} /></Field></div>}
       </div>
-
-      {showMin && (
-        <div style={{ background: mc > 0 ? "rgba(255,107,107,.08)" : "rgba(255,255,255,.04)", border: `1px solid ${mc > 0 ? "rgba(255,107,107,.3)" : T.cardLine}`, borderRadius: 12, padding: "11px 13px", marginTop: -4, marginBottom: 15 }}>
-          <div style={{ color: mc > 0 ? T.redHi : T.dim, fontSize: 11.5, lineHeight: 1.5 }}>
-            {mc > 0
-              ? `Fall short and the missing reps are charged at day close — up to −${mc * pv} pts if you log none.${kind === "better" ? " Note: this gives a Better DO a downside." : ""}`
-              : "Leave at 0 for no minimum. Set one and falling short costs you points."}
-          </div>
-        </div>
-      )}
 
       <Field label="Repeat"><div style={{ display: "flex", gap: 7 }}>{seg("daily", sched, setSched, "Daily")}{seg("once", sched, setSched, "One-time")}{seg("custom", sched, setSched, "Custom")}</div></Field>
       {sched === "custom" && (
