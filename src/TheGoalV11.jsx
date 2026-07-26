@@ -64,7 +64,8 @@ const KIND = {
 };
 const sign = (t) => (t.kind === "dont" ? -1 : 1);
 const dontViolated = (t) => (t.mode === "simple" ? !!t.doneToday : t.mode === "repeat" ? (t.countToday || 0) > 0 : (t.qtyToday || 0) > 0);
-const dontRewardPts = (t) => (t.kind === "dont" && t.sched === "daily" && !dontViolated(t) ? t.points : 0);
+const dontRewardValue = (t) => Math.max(0, t.rewardPts ?? 0);
+const dontRewardPts = (t) => (t.kind === "dont" && t.sched === "daily" && !dontViolated(t) ? dontRewardValue(t) : 0);
 const earned = (t) => {
   if (t.mode === "repeat") return sign(t) * t.points * (t.countToday || 0);
   if (t.mode === "count") return sign(t) * t.points * (t.qtyToday || 0);
@@ -99,7 +100,11 @@ function schedLabel(t) {
         if (c.mode === "everyN") return `Every ${c.everyN} days`;
         if (c.mode === "timesWk") return `${c.timesWk}× / week`;
         return "Custom"; })();
-  const m = t.mode === "repeat" ? `${t.points} pts each`
+  const m = t.kind === "dont"
+    ? (t.mode === "repeat" ? `−${t.points} each · +${dontRewardValue(t)} if clean`
+      : t.mode === "count" ? `−${t.points} per ${t.unit || "unit"} · +${dontRewardValue(t)} if clean`
+      : `−${t.points} if done · +${dontRewardValue(t)} if clean`)
+    : t.mode === "repeat" ? `${t.points} pts each`
     : t.mode === "count" ? `${t.points} pt per ${t.unit || "unit"}`
     : `${t.points} pts`;
   return `${base} · ${m}`;
@@ -125,7 +130,7 @@ function runRollover(tasks, fromKey, toKey) {
         if (t.sched === "daily") {
           if (hasMin) charge(t, shortPts(t));                                   // missing reps cost
           else if (t.kind === "do" && earned(t) <= 0) charge(t, t.points);
-          else if (t.kind === "dont" && !dontViolated(t)) award(t, t.points);  // clean don't earns at submit
+          else if (t.kind === "dont" && !dontViolated(t)) award(t, dontRewardValue(t));  // clean don't earns rewardPts at submit
           // streak: DOs/Better DOs extend it by meeting the task, Don'ts extend it by avoiding it
           const success = t.kind === "dont" ? !dontViolated(t) : met(t);
           n.streak = success ? (t.streak || 0) + 1 : 0;
@@ -289,7 +294,7 @@ const seedState = (todayKey) => ({
     { id: "t4", goalId: "g1", title: "Long run", points: 60, kind: "do", mode: "simple", sched: "custom", custom: { mode: "timesWk", timesWk: 3 }, createdKey: todayKey },
     { id: "t5", goalId: "g1", title: "Workout", points: 1, unit: "min", kind: "better", mode: "count", sched: "daily", createdKey: todayKey },
     { id: "t6", goalId: "g1", title: "Kind gesture", points: 10, kind: "better", mode: "repeat", sched: "daily", createdKey: todayKey },
-    { id: "t7", goalId: "g1", title: "Cigarette", points: 15, kind: "dont", mode: "repeat", sched: "daily", createdKey: todayKey, streak: 9, note: "9 days clean. Don't trade that for one." },
+    { id: "t7", goalId: "g1", title: "Cigarette", points: 15, rewardPts: 10, kind: "dont", mode: "repeat", sched: "daily", createdKey: todayKey, streak: 9, note: "9 days clean. Don't trade that for one." },
   ].map((t) => ({ streak: 0, note: "", fixed: false, ...t, doneToday: false, countToday: 0, qtyToday: 0, weekLog: 0, weekDue: 0, weekShort: 0, weekUnits: 0, completed: false })),
   settings: { dayEndHour: 3, dayEndMin: 0 },
   lastDayKey: todayKey,
@@ -693,7 +698,7 @@ function Row({ t, onApply, onEdit }) {
         </button>
 
         <span style={{ color: val > 0 ? T.blue : val < 0 ? T.red : negKind ? T.green : T.muted, fontSize: 14, fontWeight: 700, flexShrink: 0 }}>
-          {val > 0 ? `+${val}` : val < 0 ? `${val}` : negKind ? `+${t.points}` : `${t.points}`}
+          {val > 0 ? `+${val}` : val < 0 ? `${val}` : negKind ? `+${dontRewardValue(t)}` : `${t.points}`}
         </span>
       </div>
 
@@ -1242,18 +1247,18 @@ function SettingsModal({ settings, onChange, onClose, onAdvance, onReset, todayL
 
 function GoalModal({ initial, onClose, onSave, onDelete, canDelete }) {
   const [name, setName] = useState(initial?.name || "");
-  const [target, setTarget] = useState(initial?.target || 1000);
+  const [target, setTarget] = useState(String(initial?.target || 1000));
   const ok = name.trim().length > 0;
   return (
     <Shell title={initial ? "Edit goal" : "New goal"} onClose={onClose} footer={
       <>
-        <button onClick={() => ok && onSave({ name: name.trim(), target: Math.max(1, target) }, initial)} style={{ width: "100%", marginTop: 4, background: ok ? T.blue : "rgba(255,255,255,.08)", color: ok ? "#04101F" : T.dim, border: "none", borderRadius: 14, padding: "15px 0", fontSize: 15, fontWeight: 700, cursor: ok ? "pointer" : "default" }}>
+        <button onClick={() => ok && onSave({ name: name.trim(), target: Math.max(1, parseInt(target) || 1000) }, initial)} style={{ width: "100%", marginTop: 4, background: ok ? T.blue : "rgba(255,255,255,.08)", color: ok ? "#04101F" : T.dim, border: "none", borderRadius: 14, padding: "15px 0", fontSize: 15, fontWeight: 700, cursor: ok ? "pointer" : "default" }}>
           {initial ? "Save changes" : "Create goal"}
         </button>
         {initial && canDelete && <button onClick={() => onDelete(initial)} style={dangerBtn}><Trash2 size={15} /> Delete goal and its tasks</button>}
       </>}>
       <Field label="Goal name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Learn Spanish" style={inp} /></Field>
-      <Field label="Target points"><NumStepper value={target} onChange={setTarget} min={1} max={999999} /></Field>
+      <Field label="Target points"><input value={target} onChange={(e) => setTarget(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={inp} /></Field>
       {initial && <div style={{ color: T.dim, fontSize: 11.5, marginTop: -6, lineHeight: 1.5 }}>Achieved points stay as they are — changing the target just moves the finish line.</div>}
     </Shell>
   );
@@ -1261,17 +1266,18 @@ function GoalModal({ initial, onClose, onSave, onDelete, canDelete }) {
 
 function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
   const [title, setTitle] = useState(initial?.title || "");
-  const [points, setPoints] = useState(initial?.points ?? 20);
+  const [points, setPoints] = useState(String(initial?.points ?? 20));
+  const [rewardPts, setRewardPts] = useState(String(initial?.rewardPts ?? 10));
   const [unit, setUnit] = useState(initial?.unit || "min");
-  const [minCount, setMinCount] = useState(initial?.minCount ?? 0);
+  const [minCount, setMinCount] = useState(String(initial?.minCount ?? 0));
   const [noteText, setNoteText] = useState(initial?.note || "");
   const [kind, setKind] = useState(initial?.kind || "do");
   const [mode, setMode] = useState(initial?.mode || "simple");
   const [sched, setSched] = useState(initial?.sched || "daily");
   const [cmode, setCmode] = useState(initial?.custom?.mode || "weekdays");
   const [days, setDays] = useState(initial?.custom?.days || [1, 3, 5]);
-  const [everyN, setEveryN] = useState(initial?.custom?.everyN ?? 2);
-  const [timesWk, setTimesWk] = useState(initial?.custom?.timesWk ?? 3);
+  const [everyN, setEveryN] = useState(String(initial?.custom?.everyN ?? 2));
+  const [timesWk, setTimesWk] = useState(String(initial?.custom?.timesWk ?? 3));
   const ok = title.trim().length > 0;
   const isFixed = !!initial?.fixed;
 
@@ -1285,9 +1291,11 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
     </button>
   );
 
-  const mc = Math.max(0, minCount);
-  const pv = Math.max(1, points);
+  const mc = Math.max(0, parseInt(minCount) || 0);
+  const pv = Math.max(1, parseInt(points) || 10);
+  const rv = Math.max(0, parseInt(rewardPts) || 0);
   const showMin = mode === "repeat" && kind !== "dont";
+  const isDont = kind === "dont";
 
   const save = () => {
     if (!ok) return;
@@ -1295,13 +1303,16 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
     if (isFixed) t.fixed = true;
     t.unit = mode === "count" ? (unit.trim() || "unit") : undefined;
     t.minCount = showMin ? mc : 0;
+    t.rewardPts = isDont ? rv : undefined;
     t.custom = sched === "custom"
-      ? (cmode === "weekdays" ? { mode: "weekdays", days } : cmode === "everyN" ? { mode: "everyN", everyN: Math.max(1, everyN) } : { mode: "timesWk", timesWk: Math.max(1, timesWk) })
+      ? (cmode === "weekdays" ? { mode: "weekdays", days } : cmode === "everyN" ? { mode: "everyN", everyN: Math.max(1, parseInt(everyN) || 2) } : { mode: "timesWk", timesWk: Math.max(1, parseInt(timesWk) || 3) })
       : undefined;
     onSave(t, initial);
   };
 
-  const ptsLabel = mode === "repeat" ? "Points each time" : mode === "count" ? "Points per unit" : "Points";
+  const ptsLabel = isDont
+    ? (mode === "repeat" ? "Penalty each time" : mode === "count" ? "Penalty per unit" : "Penalty if done")
+    : (mode === "repeat" ? "Points each time" : mode === "count" ? "Points per unit" : "Points");
 
   return (
     <Shell title={initial ? "Edit task" : "Add task"} onClose={onClose} footer={
@@ -1326,7 +1337,7 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
           <div style={{ display: "flex", gap: 8 }}>
             {kindBtn("do", "DO", "miss = −pts")}
             {kindBtn("better", "Better DO", "miss = nothing")}
-            {kindBtn("dont", "Don't", "avoid = +pts")}
+            {kindBtn("dont", "Don't", "penalty vs reward")}
           </div>
         )}
       </Field>
@@ -1345,9 +1356,10 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
       </Field>
 
       <div style={{ display: "flex", gap: 12 }}>
-        <div style={{ flex: 1 }}><Field label={ptsLabel}><NumStepper value={points} onChange={setPoints} min={1} max={9999} /></Field></div>
+        <div style={{ flex: 1 }}><Field label={ptsLabel}><input value={points} onChange={(e) => setPoints(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={inp} /></Field></div>
+        {isDont && <div style={{ flex: 1 }}><Field label="Reward if avoided"><input value={rewardPts} onChange={(e) => setRewardPts(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={inp} /></Field></div>}
         {mode === "count" && <div style={{ flex: 1 }}><Field label="Unit"><input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="min, page, rep" style={inp} /></Field></div>}
-        {showMin && <div style={{ flex: 1 }}><Field label="Minimum per day"><NumStepper value={minCount} onChange={setMinCount} min={0} max={999} /></Field></div>}
+        {showMin && <div style={{ flex: 1 }}><Field label="Minimum per day"><input value={minCount} onChange={(e) => setMinCount(e.target.value.replace(/\D/g, ""))} inputMode="numeric" placeholder="0 = none" style={inp} /></Field></div>}
       </div>
 
       <Field label="Repeat"><div style={{ display: "flex", gap: 7 }}>{seg("daily", sched, setSched, "Daily")}{seg("once", sched, setSched, "One-time")}{seg("custom", sched, setSched, "Custom")}</div></Field>
@@ -1361,8 +1373,8 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
               ))}
             </div>
           )}
-          {cmode === "everyN" && <div style={{ display: "flex", alignItems: "center", gap: 11 }}><span style={{ color: T.muted, fontSize: 14 }}>Every</span><NumStepper value={everyN} onChange={setEveryN} min={1} max={365} compact /><span style={{ color: T.muted, fontSize: 14 }}>days</span></div>}
-          {cmode === "timesWk" && <div style={{ display: "flex", alignItems: "center", gap: 11 }}><NumStepper value={timesWk} onChange={setTimesWk} min={1} max={7} compact /><span style={{ color: T.muted, fontSize: 14 }}>times per week</span></div>}
+          {cmode === "everyN" && <div style={{ display: "flex", alignItems: "center", gap: 11 }}><span style={{ color: T.muted, fontSize: 14 }}>Every</span><input value={everyN} onChange={(e) => setEveryN(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={{ ...inp, width: 72, textAlign: "center" }} /><span style={{ color: T.muted, fontSize: 14 }}>days</span></div>}
+          {cmode === "timesWk" && <div style={{ display: "flex", alignItems: "center", gap: 11 }}><input value={timesWk} onChange={(e) => setTimesWk(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={{ ...inp, width: 72, textAlign: "center" }} /><span style={{ color: T.muted, fontSize: 14 }}>times per week</span></div>}
           <div style={{ color: T.dim, fontSize: 11, marginTop: 10, lineHeight: 1.45 }}>Custom schedules settle at the end of the week, not each day.</div>
         </div>
       )}
