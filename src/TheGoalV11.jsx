@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { ChevronRight, Plus, Check, Target, ListChecks, Activity, X, Flame, Trophy, Minus, Settings, Clock, FastForward, Trash2, Pencil, AlertTriangle, Quote, Pin, BookOpen } from "lucide-react";
 
 /* ============================== tokens ============================== */
@@ -60,9 +60,11 @@ const fmtTime = (h, m) => { const ap = h >= 12 ? "PM" : "AM"; const hh = h % 12 
 const KIND = {
   do:     { label: "DOs",        tint: T.amber, note: "Miss = lose points" },
   better: { label: "Better DOs", tint: T.green, note: "Miss = no effect" },
-  dont:   { label: "Don'ts",     tint: T.red,   note: "Do it = lose points" },
+  dont:   { label: "Don'ts",     tint: T.red,   note: "Avoid = earn points · Do it = lose points" },
 };
 const sign = (t) => (t.kind === "dont" ? -1 : 1);
+const dontViolated = (t) => (t.mode === "simple" ? !!t.doneToday : t.mode === "repeat" ? (t.countToday || 0) > 0 : (t.qtyToday || 0) > 0);
+const dontRewardPts = (t) => (t.kind === "dont" && t.sched === "daily" && !dontViolated(t) ? t.points : 0);
 const earned = (t) => {
   if (t.mode === "repeat") return sign(t) * t.points * (t.countToday || 0);
   if (t.mode === "count") return sign(t) * t.points * (t.qtyToday || 0);
@@ -106,11 +108,13 @@ function schedLabel(t) {
 /* ---- settle days and weeks ---- */
 function runRollover(tasks, fromKey, toKey) {
   const penalties = {};
+  const rewards = {};
   let list = tasks.map((t) => ({ ...t }));
   let cur = keyToDate(fromKey);
   const end = keyToDate(toKey);
   let guard = 0;
   const charge = (t, amt) => { if (amt > 0) penalties[t.goalId] = (penalties[t.goalId] || 0) + amt; };
+  const award = (t, amt) => { if (amt > 0) rewards[t.goalId] = (rewards[t.goalId] || 0) + amt; };
 
   while (cur < end && guard++ < 21) {
     list = list.map((t) => {
@@ -121,8 +125,9 @@ function runRollover(tasks, fromKey, toKey) {
         if (t.sched === "daily") {
           if (hasMin) charge(t, shortPts(t));                                   // missing reps cost
           else if (t.kind === "do" && earned(t) <= 0) charge(t, t.points);
+          else if (t.kind === "dont" && !dontViolated(t)) award(t, t.points);  // clean don't earns at submit
           // streak: DOs/Better DOs extend it by meeting the task, Don'ts extend it by avoiding it
-          const success = t.kind === "dont" ? earned(t) === 0 : met(t);
+          const success = t.kind === "dont" ? !dontViolated(t) : met(t);
           n.streak = success ? (t.streak || 0) + 1 : 0;
         }
         if (t.sched === "custom") {
@@ -163,7 +168,7 @@ function runRollover(tasks, fromKey, toKey) {
     }
     cur = addDays(cur, 1);
   }
-  return { tasks: list, penalties };
+  return { tasks: list, penalties, rewards };
 }
 
 /* ==================== journey line with travel effects ==================== */
@@ -338,29 +343,21 @@ export default function TheGoalApp() {
     return () => clearTimeout(id);
   }, [ready, goals, tasks, settings, lastDayKey, dayOffset, verseSeen]);
 
-  useEffect(() => {
-    if (!ready || !lastDayKey || lastDayKey === todayKey) return;
-    const { tasks: next, penalties } = runRollover(tasks, lastDayKey, todayKey);
-    setTasks(next);
-    const total = Object.values(penalties).reduce((a, b) => a + b, 0);
-    if (total > 0) {
-      const before = {};
-      setGoals((gs) => gs.map((g) => {
-        if (!penalties[g.id]) return g;
-        before[g.id] = g.achieved;                       // remember where the ball stood
-        return { ...g, achieved: g.achieved - penalties[g.id] };
-      }));
-      setMarch(before);
-    }
-    setLastDayKey(todayKey);
-    flash(total > 0 ? `Day closed · −${total} pts from shortfalls` : "New day · slate is clean");
-  }, [ready, lastDayKey, todayKey, tasks, flash]);
+  const pendingSubmit = !!(lastDayKey && todayKey > lastDayKey);
+  const activeDay = pendingSubmit ? keyToDate(lastDayKey) : today;
+  const activeDayKey = pendingSubmit ? lastDayKey : todayKey;
 
   const goal = goals.find((g) => g.id === activeId) || goals[0];
   const gAll = goal ? tasks.filter((t) => t.goalId === goal.id && !t.completed) : [];
-  const gToday = gAll.filter((t) => isDue(t, today));
+  const gToday = gAll.filter((t) => isDue(t, activeDay));
   const todayPoints = gToday.reduce((s, t) => s + earned(t), 0);
   const atRisk = gToday.reduce((s, t) => s + riskPts(t), 0);
+
+  const submitPreview = useMemo(() => {
+    if (!pendingSubmit || !goal) return { pen: 0, rew: 0 };
+    const { penalties, rewards } = runRollover(JSON.parse(JSON.stringify(tasks)), lastDayKey, todayKey);
+    return { pen: penalties[goal.id] || 0, rew: rewards[goal.id] || 0 };
+  }, [pendingSubmit, tasks, lastDayKey, todayKey, goal]);
 
   const bump = (gid, d) => { if (d) setGoals((gs) => gs.map((g) => (g.id === gid ? { ...g, achieved: g.achieved + d } : g))); };
   const openJourney = () => setView("journey");
@@ -368,6 +365,27 @@ export default function TheGoalApp() {
   const arrive = useCallback(() => {
     setMarch((m) => { if (!goal || m[goal.id] == null) return m; const n = { ...m }; delete n[goal.id]; return n; });
   }, [goal]);
+
+  const submitDay = useCallback(() => {
+    if (!pendingSubmit) return;
+    const { tasks: next, penalties, rewards } = runRollover(tasks, lastDayKey, todayKey);
+    setTasks(next);
+    const before = {};
+    setGoals((gs) => gs.map((g) => {
+      const pen = penalties[g.id] || 0;
+      const rew = rewards[g.id] || 0;
+      if (pen || rew) before[g.id] = g.achieved;
+      return { ...g, achieved: g.achieved + rew - pen };
+    }));
+    if (Object.keys(before).length) setMarch(before);
+    setLastDayKey(todayKey);
+    const totalPen = Object.values(penalties).reduce((a, b) => a + b, 0);
+    const totalRew = Object.values(rewards).reduce((a, b) => a + b, 0);
+    const parts = [];
+    if (totalRew > 0) parts.push(`+${totalRew} earned`);
+    if (totalPen > 0) parts.push(`−${totalPen} shortfalls`);
+    flash(parts.length ? `Day submitted · ${parts.join(" · ")}` : "Day submitted · slate is clean");
+  }, [pendingSubmit, tasks, lastDayKey, todayKey, flash]);
 
   const showBurst = (delta) => {
     if (!delta) return;
@@ -464,8 +482,8 @@ export default function TheGoalApp() {
             </div>
           </div>
           {burst && <div key={burst.id} style={{ position: "absolute", left: "50%", top: "34%", color: burst.pos ? T.blueHi : T.red, fontSize: 34, fontWeight: 600, animation: "burst 1.1s ease-out forwards", pointerEvents: "none" }}>{burst.text}</div>}
-          {verseSeen !== todayKey && marchFrom == null && (
-            <DailyVerse dayKeyStr={todayKey} onDismiss={() => setVerseSeen(todayKey)} />
+          {verseSeen !== activeDayKey && marchFrom == null && (
+            <DailyVerse dayKeyStr={activeDayKey} onDismiss={() => setVerseSeen(activeDayKey)} />
           )}
         </div>
       )}
@@ -492,11 +510,28 @@ export default function TheGoalApp() {
           </button>
 
           <div style={{ flex: 1, overflowY: "auto", padding: "18px 20px 24px" }}>
+            {pendingSubmit && (
+              <div style={{ background: "rgba(59,156,255,.1)", border: "1px solid rgba(59,156,255,.35)", borderRadius: 14, padding: "14px 16px", marginBottom: 16 }}>
+                <div style={{ color: T.blueHi, fontSize: 13.5, fontWeight: 600, lineHeight: 1.45 }}>Your day ended — review your tasks, then submit.</div>
+                <div style={{ color: T.muted, fontSize: 12, marginTop: 6, lineHeight: 1.45 }}>
+                  {submitPreview.rew > 0 && <span style={{ color: T.green }}>+{submitPreview.rew} from clean Don'ts</span>}
+                  {submitPreview.rew > 0 && submitPreview.pen > 0 && <span> · </span>}
+                  {submitPreview.pen > 0 && <span style={{ color: T.red }}>−{submitPreview.pen} from shortfalls</span>}
+                  {!submitPreview.rew && !submitPreview.pen && "No settlement points pending."}
+                </div>
+                <button onClick={submitDay} style={{ width: "100%", marginTop: 12, background: T.blue, color: "#04101F", border: "none", borderRadius: 12, padding: "13px 0", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}>
+                  Submit day
+                </button>
+              </div>
+            )}
+
             <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginBottom: 14 }}>
               <div>
-                <div style={{ color: T.text, fontSize: 21, fontWeight: 500 }}>{DAYNAMES[today.getDay()]}'s tasks</div>
+                <div style={{ color: T.text, fontSize: 21, fontWeight: 500 }}>
+                  {DAYNAMES[activeDay.getDay()]}'s tasks{pendingSubmit ? " · ready to submit" : ""}
+                </div>
                 <div style={{ color: T.dim, fontSize: 11.5, marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
-                  <Clock size={12} /> Day closes at {fmtTime(settings.dayEndHour, settings.dayEndMin)}
+                  <Clock size={12} /> {pendingSubmit ? "Review and submit when ready" : `Day closes at ${fmtTime(settings.dayEndHour, settings.dayEndMin)}`}
                 </div>
               </div>
               <button onClick={() => setModal({ type: "task" })} style={{ background: T.blue, color: "#04101F", border: "none", borderRadius: 11, padding: "9px 14px", fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}><Plus size={16} /> Add</button>
@@ -591,6 +626,20 @@ function Group({ kind, tasks, onApply, onEdit }) {
 
 const rndBtn = { width: 28, height: 28, borderRadius: "50%", background: "rgba(255,255,255,.06)", border: `1px solid ${T.cardLine}`, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" };
 
+function NumStepper({ value, onChange, min = 0, max = 9999, step = 1, compact, accent }) {
+  const v = value ?? 0;
+  const dec = () => onChange(Math.max(min, v - step));
+  const inc = () => onChange(Math.min(max, v + step));
+  const tint = accent || T.blue;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: compact ? 6 : 8, width: compact ? undefined : "100%" }}>
+      <button type="button" onClick={dec} disabled={v <= min} style={{ ...rndBtn, opacity: v <= min ? 0.35 : 1, cursor: v <= min ? "default" : "pointer" }}><Minus size={14} color={T.muted} /></button>
+      <span style={{ color: T.text, fontSize: compact ? 15 : 16, fontWeight: 700, minWidth: compact ? 24 : 40, textAlign: "center", flex: compact ? undefined : 1 }}>{v}</span>
+      <button type="button" onClick={inc} disabled={v >= max} style={{ ...rndBtn, borderColor: tint, opacity: v >= max ? 0.35 : 1, cursor: v >= max ? "default" : "pointer" }}><Plus size={14} color={tint} /></button>
+    </div>
+  );
+}
+
 function Row({ t, onApply, onEdit }) {
   const [noteOpen, setNoteOpen] = useState(false);
   const meta = KIND[t.kind];
@@ -622,8 +671,7 @@ function Row({ t, onApply, onEdit }) {
         )}
         {t.mode === "count" && (
           <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
-            <input value={t.qtyToday || 0} onChange={(e) => onApply(t, { qtyToday: Math.max(0, parseInt(e.target.value.replace(/\D/g, "")) || 0) })} inputMode="numeric"
-              style={{ width: 50, background: "rgba(255,255,255,.06)", border: `1px solid ${(t.qtyToday || 0) > 0 ? meta.tint : T.cardLine}`, borderRadius: 9, padding: "7px 4px", color: T.text, fontSize: 15, fontWeight: 600, textAlign: "center", outline: "none" }} />
+            <NumStepper value={t.qtyToday || 0} onChange={(v) => onApply(t, { qtyToday: v })} min={0} compact accent={meta.tint} />
             <span style={{ color: T.dim, fontSize: 11 }}>{t.unit || "unit"}</span>
           </div>
         )}
@@ -644,8 +692,8 @@ function Row({ t, onApply, onEdit }) {
           </div>
         </button>
 
-        <span style={{ color: val > 0 ? T.blue : val < 0 ? T.red : T.muted, fontSize: 14, fontWeight: 700, flexShrink: 0 }}>
-          {val > 0 ? `+${val}` : val < 0 ? `${val}` : negKind ? `−${t.points}` : `${t.points}`}
+        <span style={{ color: val > 0 ? T.blue : val < 0 ? T.red : negKind ? T.green : T.muted, fontSize: 14, fontWeight: 700, flexShrink: 0 }}>
+          {val > 0 ? `+${val}` : val < 0 ? `${val}` : negKind ? `+${t.points}` : `${t.points}`}
         </span>
       </div>
 
@@ -1176,7 +1224,7 @@ function SettingsModal({ settings, onChange, onClose, onAdvance, onReset, todayL
           </select>
         </div>
         <div style={{ color: T.dim, fontSize: 11.5, marginTop: 8, lineHeight: 1.5 }}>
-          Unmet daily DOs and unreached minimums are charged at this moment. Weekday, every-N and ×/week tasks settle when the week ends.
+          When the day ends, review your tasks and tap Submit day. Unmet daily DOs, unreached minimums, and clean Don't rewards settle then. Weekday, every-N and ×/week tasks settle when the week ends.
         </div>
       </Field>
 
@@ -1194,18 +1242,18 @@ function SettingsModal({ settings, onChange, onClose, onAdvance, onReset, todayL
 
 function GoalModal({ initial, onClose, onSave, onDelete, canDelete }) {
   const [name, setName] = useState(initial?.name || "");
-  const [target, setTarget] = useState(String(initial?.target || 1000));
+  const [target, setTarget] = useState(initial?.target || 1000);
   const ok = name.trim().length > 0;
   return (
     <Shell title={initial ? "Edit goal" : "New goal"} onClose={onClose} footer={
       <>
-        <button onClick={() => ok && onSave({ name: name.trim(), target: Math.max(1, parseInt(target) || 1000) }, initial)} style={{ width: "100%", marginTop: 4, background: ok ? T.blue : "rgba(255,255,255,.08)", color: ok ? "#04101F" : T.dim, border: "none", borderRadius: 14, padding: "15px 0", fontSize: 15, fontWeight: 700, cursor: ok ? "pointer" : "default" }}>
+        <button onClick={() => ok && onSave({ name: name.trim(), target: Math.max(1, target) }, initial)} style={{ width: "100%", marginTop: 4, background: ok ? T.blue : "rgba(255,255,255,.08)", color: ok ? "#04101F" : T.dim, border: "none", borderRadius: 14, padding: "15px 0", fontSize: 15, fontWeight: 700, cursor: ok ? "pointer" : "default" }}>
           {initial ? "Save changes" : "Create goal"}
         </button>
         {initial && canDelete && <button onClick={() => onDelete(initial)} style={dangerBtn}><Trash2 size={15} /> Delete goal and its tasks</button>}
       </>}>
       <Field label="Goal name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Learn Spanish" style={inp} /></Field>
-      <Field label="Target points"><input value={target} onChange={(e) => setTarget(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={inp} /></Field>
+      <Field label="Target points"><NumStepper value={target} onChange={setTarget} min={1} max={999999} /></Field>
       {initial && <div style={{ color: T.dim, fontSize: 11.5, marginTop: -6, lineHeight: 1.5 }}>Achieved points stay as they are — changing the target just moves the finish line.</div>}
     </Shell>
   );
@@ -1213,17 +1261,17 @@ function GoalModal({ initial, onClose, onSave, onDelete, canDelete }) {
 
 function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
   const [title, setTitle] = useState(initial?.title || "");
-  const [points, setPoints] = useState(String(initial?.points ?? 20));
+  const [points, setPoints] = useState(initial?.points ?? 20);
   const [unit, setUnit] = useState(initial?.unit || "min");
-  const [minCount, setMinCount] = useState(String(initial?.minCount ?? 0));
+  const [minCount, setMinCount] = useState(initial?.minCount ?? 0);
   const [noteText, setNoteText] = useState(initial?.note || "");
   const [kind, setKind] = useState(initial?.kind || "do");
   const [mode, setMode] = useState(initial?.mode || "simple");
   const [sched, setSched] = useState(initial?.sched || "daily");
   const [cmode, setCmode] = useState(initial?.custom?.mode || "weekdays");
   const [days, setDays] = useState(initial?.custom?.days || [1, 3, 5]);
-  const [everyN, setEveryN] = useState(String(initial?.custom?.everyN ?? 2));
-  const [timesWk, setTimesWk] = useState(String(initial?.custom?.timesWk ?? 3));
+  const [everyN, setEveryN] = useState(initial?.custom?.everyN ?? 2);
+  const [timesWk, setTimesWk] = useState(initial?.custom?.timesWk ?? 3);
   const ok = title.trim().length > 0;
   const isFixed = !!initial?.fixed;
 
@@ -1237,8 +1285,8 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
     </button>
   );
 
-  const mc = Math.max(0, parseInt(minCount) || 0);
-  const pv = Math.max(1, parseInt(points) || 10);
+  const mc = Math.max(0, minCount);
+  const pv = Math.max(1, points);
   const showMin = mode === "repeat" && kind !== "dont";
 
   const save = () => {
@@ -1248,7 +1296,7 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
     t.unit = mode === "count" ? (unit.trim() || "unit") : undefined;
     t.minCount = showMin ? mc : 0;
     t.custom = sched === "custom"
-      ? (cmode === "weekdays" ? { mode: "weekdays", days } : cmode === "everyN" ? { mode: "everyN", everyN: Math.max(1, parseInt(everyN) || 2) } : { mode: "timesWk", timesWk: Math.max(1, parseInt(timesWk) || 3) })
+      ? (cmode === "weekdays" ? { mode: "weekdays", days } : cmode === "everyN" ? { mode: "everyN", everyN: Math.max(1, everyN) } : { mode: "timesWk", timesWk: Math.max(1, timesWk) })
       : undefined;
     onSave(t, initial);
   };
@@ -1278,7 +1326,7 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
           <div style={{ display: "flex", gap: 8 }}>
             {kindBtn("do", "DO", "miss = −pts")}
             {kindBtn("better", "Better DO", "miss = nothing")}
-            {kindBtn("dont", "Don't", "do it = −pts")}
+            {kindBtn("dont", "Don't", "avoid = +pts")}
           </div>
         )}
       </Field>
@@ -1297,9 +1345,9 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
       </Field>
 
       <div style={{ display: "flex", gap: 12 }}>
-        <div style={{ flex: 1 }}><Field label={ptsLabel}><input value={points} onChange={(e) => setPoints(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={inp} /></Field></div>
+        <div style={{ flex: 1 }}><Field label={ptsLabel}><NumStepper value={points} onChange={setPoints} min={1} max={9999} /></Field></div>
         {mode === "count" && <div style={{ flex: 1 }}><Field label="Unit"><input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="min, page, rep" style={inp} /></Field></div>}
-        {showMin && <div style={{ flex: 1 }}><Field label="Minimum per day"><input value={minCount} onChange={(e) => setMinCount(e.target.value.replace(/\D/g, ""))} inputMode="numeric" placeholder="0 = none" style={inp} /></Field></div>}
+        {showMin && <div style={{ flex: 1 }}><Field label="Minimum per day"><NumStepper value={minCount} onChange={setMinCount} min={0} max={999} /></Field></div>}
       </div>
 
       <Field label="Repeat"><div style={{ display: "flex", gap: 7 }}>{seg("daily", sched, setSched, "Daily")}{seg("once", sched, setSched, "One-time")}{seg("custom", sched, setSched, "Custom")}</div></Field>
@@ -1313,8 +1361,8 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
               ))}
             </div>
           )}
-          {cmode === "everyN" && <div style={{ display: "flex", alignItems: "center", gap: 11 }}><span style={{ color: T.muted, fontSize: 14 }}>Every</span><input value={everyN} onChange={(e) => setEveryN(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={{ ...inp, width: 72, textAlign: "center" }} /><span style={{ color: T.muted, fontSize: 14 }}>days</span></div>}
-          {cmode === "timesWk" && <div style={{ display: "flex", alignItems: "center", gap: 11 }}><input value={timesWk} onChange={(e) => setTimesWk(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={{ ...inp, width: 72, textAlign: "center" }} /><span style={{ color: T.muted, fontSize: 14 }}>times per week</span></div>}
+          {cmode === "everyN" && <div style={{ display: "flex", alignItems: "center", gap: 11 }}><span style={{ color: T.muted, fontSize: 14 }}>Every</span><NumStepper value={everyN} onChange={setEveryN} min={1} max={365} compact /><span style={{ color: T.muted, fontSize: 14 }}>days</span></div>}
+          {cmode === "timesWk" && <div style={{ display: "flex", alignItems: "center", gap: 11 }}><NumStepper value={timesWk} onChange={setTimesWk} min={1} max={7} compact /><span style={{ color: T.muted, fontSize: 14 }}>times per week</span></div>}
           <div style={{ color: T.dim, fontSize: 11, marginTop: 10, lineHeight: 1.45 }}>Custom schedules settle at the end of the week, not each day.</div>
         </div>
       )}
