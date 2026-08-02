@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { ChevronRight, ChevronUp, ChevronDown, Plus, Check, Target, ListChecks, Activity, X, Flame, Trophy, Minus, Settings, Clock, FastForward, Trash2, Pencil, AlertTriangle, Quote, Pin, BookOpen } from "lucide-react";
+import { ChevronRight, ChevronUp, ChevronDown, Plus, Check, Target, ListChecks, Activity, X, Flame, Trophy, Minus, Settings, Clock, FastForward, Trash2, Pencil, AlertTriangle, Quote, Pin, BookOpen, ArrowUpDown } from "lucide-react";
 
 /* ============================== tokens ============================== */
 const T = {
@@ -554,11 +554,14 @@ export default function TheGoalApp() {
                   <Clock size={12} /> {pendingSubmit ? "Review and submit when ready" : `Day closes at ${fmtTime(settings.dayEndHour, settings.dayEndMin)}`}
                 </div>
               </div>
-              <button onClick={() => setModal({ type: "task" })} style={{ background: T.blue, color: "#04101F", border: "none", borderRadius: 11, padding: "9px 14px", fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}><Plus size={16} /> Add</button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => setModal({ type: "order" })} disabled={gAll.length < 2} style={{ background: T.card, color: T.muted, border: `1px solid ${T.cardLine}`, borderRadius: 11, padding: "9px 11px", cursor: gAll.length < 2 ? "default" : "pointer", display: "flex", opacity: gAll.length < 2 ? 0.4 : 1 }} aria-label="Reorder tasks"><ArrowUpDown size={17} /></button>
+                <button onClick={() => setModal({ type: "task" })} style={{ background: T.blue, color: "#04101F", border: "none", borderRadius: 11, padding: "9px 14px", fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}><Plus size={16} /> Add</button>
+              </div>
             </div>
 
             {["do", "better", "dont"].map((k) => (
-              <Group key={k} kind={k} tasks={gToday.filter((t) => t.kind === k)} onApply={applyTask} onEdit={(t) => setModal({ type: "task", payload: t })} onMove={moveTask} />
+              <Group key={k} kind={k} tasks={gToday.filter((t) => t.kind === k)} onApply={applyTask} onEdit={(t) => setModal({ type: "task", payload: t })} />
             ))}
 
             {gAll.length > gToday.length && (
@@ -620,6 +623,7 @@ export default function TheGoalApp() {
 
       {modal?.type === "goal" && <GoalModal initial={modal.payload} onClose={() => setModal(null)} onSave={saveGoal} onDelete={delGoal} canDelete={goals.length > 1} />}
       {modal?.type === "task" && <TaskModal goalName={goal.name} initial={modal.payload} onClose={() => setModal(null)} onSave={saveTask} onDelete={delTask} />}
+      {modal?.type === "order" && <OrderModal tasks={gAll} onMove={moveTask} onClose={() => setModal(null)} />}
       {modal?.type === "settings" && (
         <SettingsModal settings={settings} onChange={setSettings} onClose={() => setModal(null)}
           onAdvance={() => { setDayOffset((d) => d + 1); setModal(null); }}
@@ -630,9 +634,8 @@ export default function TheGoalApp() {
 }
 
 /* ============================== task list ============================== */
-function Group({ kind, tasks, onApply, onEdit, onMove }) {
+function Group({ kind, tasks, onApply, onEdit }) {
   const meta = KIND[kind];
-  const reorderable = tasks.length > 1;
   return (
     <div style={{ marginBottom: 22 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
@@ -640,17 +643,7 @@ function Group({ kind, tasks, onApply, onEdit, onMove }) {
         <span style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>{meta.label}</span>
       </div>
       {tasks.length === 0 && <div style={{ color: T.dim, fontSize: 13, padding: "2px 2px 6px" }}>Nothing due today.</div>}
-      {tasks.map((t, i) => (
-        <Row
-          key={t.id}
-          t={t}
-          onApply={onApply}
-          onEdit={onEdit}
-          onMove={reorderable ? (dir) => onMove(t, dir, tasks) : undefined}
-          canUp={reorderable && i > 0}
-          canDown={reorderable && i < tasks.length - 1}
-        />
-      ))}
+      {tasks.map((t) => <Row key={t.id} t={t} onApply={onApply} onEdit={onEdit} />)}
     </div>
   );
 }
@@ -671,7 +664,7 @@ function NumStepper({ value, onChange, min = 0, max = 9999, step = 1, compact, a
   );
 }
 
-function Row({ t, onApply, onEdit, onMove, canUp, canDown }) {
+function Row({ t, onApply, onEdit }) {
   const [noteOpen, setNoteOpen] = useState(false);
   const meta = KIND[t.kind];
   const val = earned(t);
@@ -682,21 +675,10 @@ function Row({ t, onApply, onEdit, onMove, canUp, canDown }) {
   const border = active ? (val < 0 ? "rgba(255,107,107,.45)" : "rgba(59,156,255,.3)") : T.cardLine;
   const hasNote = !!(t.note && t.note.trim());
   const isLongNote = hasNote && (t.note.length > 110 || t.note.includes("\n") || !!t.richContent);
-  const orderBtn = { width: 22, height: 18, padding: 0, borderRadius: 5, background: "rgba(255,255,255,.04)", border: `1px solid ${T.cardLine}`, display: "flex", alignItems: "center", justifyContent: "center" };
 
   return (
     <div style={{ background: T.card, border: `1px solid ${border}`, borderRadius: 14, padding: "12px 14px", marginBottom: 9 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        {onMove && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 }}>
-            <button type="button" aria-label="Move up" disabled={!canUp} onClick={() => onMove(-1)} style={{ ...orderBtn, opacity: canUp ? 1 : 0.28, cursor: canUp ? "pointer" : "default" }}>
-              <ChevronUp size={13} color={T.muted} />
-            </button>
-            <button type="button" aria-label="Move down" disabled={!canDown} onClick={() => onMove(1)} style={{ ...orderBtn, opacity: canDown ? 1 : 0.28, cursor: canDown ? "pointer" : "default" }}>
-              <ChevronDown size={13} color={T.muted} />
-            </button>
-          </div>
-        )}
         {t.mode === "simple" && (
           <button onClick={() => onApply(t, { doneToday: !t.doneToday })} style={{ width: 27, height: 27, borderRadius: "50%", border: `2px solid ${t.doneToday ? meta.tint : "rgba(255,255,255,.22)"}`, background: t.doneToday ? meta.tint : "transparent", boxShadow: t.doneToday ? `0 0 14px ${meta.tint}` : "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
             {t.doneToday && <Check size={16} color="#04101F" strokeWidth={3} />}
@@ -1252,6 +1234,53 @@ function Field({ label, children }) {
   return <div style={{ marginBottom: 15 }}><div style={{ color: T.muted, fontSize: 12.5, fontWeight: 600, marginBottom: 7 }}>{label}</div>{children}</div>;
 }
 const dangerBtn = { width: "100%", marginTop: 10, background: "rgba(255,107,107,.1)", color: T.red, border: `1px solid rgba(255,107,107,.35)`, borderRadius: 12, padding: "12px 0", fontSize: 14, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 };
+
+function OrderModal({ tasks, onMove, onClose }) {
+  const orderBtn = { width: 34, height: 34, borderRadius: 10, background: "rgba(255,255,255,.05)", border: `1px solid ${T.cardLine}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 };
+  return (
+    <Shell title="Reorder tasks" onClose={onClose}>
+      <div style={{ color: T.dim, fontSize: 12.5, marginBottom: 16, lineHeight: 1.45 }}>
+        Move tasks up or down within each group. Order is saved automatically.
+      </div>
+      {["do", "better", "dont"].map((k) => {
+        const list = tasks.filter((t) => t.kind === k);
+        const meta = KIND[k];
+        if (!list.length) return null;
+        return (
+          <div key={k} style={{ marginBottom: 18 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+              <span style={{ width: 7, height: 7, borderRadius: 4, background: meta.tint, boxShadow: `0 0 8px ${meta.tint}` }} />
+              <span style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>{meta.label}</span>
+            </div>
+            {list.map((t, i) => {
+              const canUp = i > 0;
+              const canDown = i < list.length - 1;
+              return (
+                <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, background: T.card, border: `1px solid ${T.cardLine}`, borderRadius: 12, padding: "10px 12px", marginBottom: 8 }}>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    <button type="button" aria-label="Move up" disabled={!canUp} onClick={() => onMove(t, -1, list)} style={{ ...orderBtn, opacity: canUp ? 1 : 0.28, cursor: canUp ? "pointer" : "default" }}>
+                      <ChevronUp size={16} color={T.muted} />
+                    </button>
+                    <button type="button" aria-label="Move down" disabled={!canDown} onClick={() => onMove(t, 1, list)} style={{ ...orderBtn, opacity: canDown ? 1 : 0.28, cursor: canDown ? "pointer" : "default" }}>
+                      <ChevronDown size={16} color={T.muted} />
+                    </button>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ color: T.text, fontSize: 14.5, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</div>
+                    <div style={{ color: T.dim, fontSize: 11.5, marginTop: 2 }}>{schedLabel(t)}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+      <button onClick={onClose} style={{ width: "100%", marginTop: 4, background: T.blue, color: "#04101F", border: "none", borderRadius: 12, padding: "13px 0", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}>
+        Done
+      </button>
+    </Shell>
+  );
+}
 
 function SettingsModal({ settings, onChange, onClose, onAdvance, onReset, todayLabel }) {
   return (
