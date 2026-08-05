@@ -60,13 +60,25 @@ const fmtTime = (h, m) => { const ap = h >= 12 ? "PM" : "AM"; const hh = h % 12 
 const KIND = {
   do:     { label: "DOs",        tint: T.amber, note: "Miss = lose points" },
   better: { label: "Better DOs", tint: T.green, note: "Miss = no effect" },
-  dont:   { label: "Don'ts",     tint: T.red,   note: "Avoid = earn points · Do it = lose points" },
+  dont:   { label: "Don'ts",     tint: T.red,   note: "Avoid = earn · Do it = fixed pts or % of progress" },
 };
 const sign = (t) => (t.kind === "dont" ? -1 : 1);
 const dontViolated = (t) => (t.mode === "simple" ? !!t.doneToday : t.mode === "repeat" ? (t.countToday || 0) > 0 : (t.qtyToday || 0) > 0);
 const dontRewardValue = (t) => Math.max(0, t.rewardPts ?? 0);
 const dontRewardPts = (t) => (t.kind === "dont" && t.sched === "daily" && !dontViolated(t) ? dontRewardValue(t) : 0);
-const earned = (t) => {
+const isPercentDont = (t) => t.kind === "dont" && t.penaltyType === "percent";
+const violationUnits = (t) => (t.mode === "repeat" ? (t.countToday || 0) : t.mode === "count" ? (t.qtyToday || 0) : (t.doneToday ? 1 : 0));
+const dontPenaltyPct = (t) => Math.max(0, Math.min(100, Number(t.penaltyPct) || 0));
+/** Points lost per violation for a % Don't, based on current progress. */
+const percentHit = (t, achieved) => Math.round(Math.max(0, achieved) * dontPenaltyPct(t) / 100);
+const earned = (t, goal) => {
+  if (isPercentDont(t)) {
+    const snapped = t.penToday;
+    if (snapped != null) return -Math.max(0, snapped);
+    const u = violationUnits(t);
+    if (!u) return 0;
+    return -percentHit(t, goal?.achieved ?? 0) * u;
+  }
   if (t.mode === "repeat") return sign(t) * t.points * (t.countToday || 0);
   if (t.mode === "count") return sign(t) * t.points * (t.qtyToday || 0);
   return t.doneToday ? sign(t) * t.points : 0;
@@ -83,6 +95,31 @@ const riskPts = (t) => {
   if (minOf(t) > 0) return shortPts(t);
   return met(t) ? 0 : t.points;
 };
+
+const taskSuccess = (t) => (t.kind === "dont" ? !dontViolated(t) : met(t));
+const goalReached = (g) => g.achieved >= g.target && (!(g.subgoals || []).length || (g.subgoals || []).every((s) => s.done));
+const subgoalsDone = (g) => (g.subgoals || []).filter((s) => s.done).length;
+const subgoalsTotal = (g) => (g.subgoals || []).length;
+
+function advanceGoalSubgoals(goalList, list, daySuccess, cur) {
+  return goalList.map((g) => ({
+    ...g,
+    subgoals: (g.subgoals || []).map((sg) => {
+      if (sg.done) return sg;
+      const ids = (sg.taskIds || []).filter((id) => list.some((t) => t.id === id && t.goalId === g.id));
+      if (!ids.length) return sg;
+      const allOk = ids.every((id) => {
+        const t = list.find((x) => x.id === id);
+        if (!t || t.completed || t.sched !== "daily") return true;
+        if (!isDue(t, cur)) return true;
+        return daySuccess[id] === true;
+      });
+      const currentStreak = allOk ? (sg.currentStreak || 0) + 1 : 0;
+      const done = currentStreak >= (sg.targetStreak || 1);
+      return { ...sg, currentStreak, done: sg.done || done };
+    }),
+  }));
+}
 
 function isDue(t, date) {
   if (t.completed) return false;
@@ -101,9 +138,13 @@ function schedLabel(t) {
         if (c.mode === "timesWk") return `${c.timesWk}× / week`;
         return "Custom"; })();
   const m = t.kind === "dont"
-    ? (t.mode === "repeat" ? `−${t.points} each · +${dontRewardValue(t)} if clean`
-      : t.mode === "count" ? `−${t.points} per ${t.unit || "unit"} · +${dontRewardValue(t)} if clean`
-      : `−${t.points} if done · +${dontRewardValue(t)} if clean`)
+    ? (isPercentDont(t)
+      ? (t.mode === "repeat" ? `−${dontPenaltyPct(t)}% progress each · +${dontRewardValue(t)} if clean`
+        : t.mode === "count" ? `−${dontPenaltyPct(t)}% progress per ${t.unit || "unit"} · +${dontRewardValue(t)} if clean`
+        : `−${dontPenaltyPct(t)}% of progress if done · +${dontRewardValue(t)} if clean`)
+      : (t.mode === "repeat" ? `−${t.points} each · +${dontRewardValue(t)} if clean`
+        : t.mode === "count" ? `−${t.points} per ${t.unit || "unit"} · +${dontRewardValue(t)} if clean`
+        : `−${t.points} if done · +${dontRewardValue(t)} if clean`))
     : t.mode === "repeat" ? `${t.points} pts each`
     : t.mode === "count" ? `${t.points} pt per ${t.unit || "unit"}`
     : `${t.points} pts`;
@@ -111,10 +152,11 @@ function schedLabel(t) {
 }
 
 /* ---- settle days and weeks ---- */
-function runRollover(tasks, fromKey, toKey) {
+function runRollover(tasks, goals, fromKey, toKey) {
   const penalties = {};
   const rewards = {};
   let list = tasks.map((t) => ({ ...t }));
+  let goalList = (goals || []).map((g) => ({ ...g, subgoals: (g.subgoals || []).map((s) => ({ ...s })) }));
   let cur = keyToDate(fromKey);
   const end = keyToDate(toKey);
   let guard = 0;
@@ -122,6 +164,7 @@ function runRollover(tasks, fromKey, toKey) {
   const award = (t, amt) => { if (amt > 0) rewards[t.goalId] = (rewards[t.goalId] || 0) + amt; };
 
   while (cur < end && guard++ < 21) {
+    const daySuccess = {};
     list = list.map((t) => {
       if (t.completed) return t;
       const n = { ...t };
@@ -132,7 +175,8 @@ function runRollover(tasks, fromKey, toKey) {
           else if (t.kind === "do" && earned(t) <= 0) charge(t, t.points);
           else if (t.kind === "dont" && !dontViolated(t)) award(t, dontRewardValue(t));  // clean don't earns rewardPts at submit
           // streak: DOs/Better DOs extend it by meeting the task, Don'ts extend it by avoiding it
-          const success = t.kind === "dont" ? !dontViolated(t) : met(t);
+          const success = taskSuccess(t);
+          daySuccess[t.id] = success;
           n.streak = success ? (t.streak || 0) + 1 : 0;
         }
         if (t.sched === "custom") {
@@ -148,9 +192,11 @@ function runRollover(tasks, fromKey, toKey) {
         }
         if (t.sched === "once" && earned(t) > 0) n.completed = true;
       }
-      n.doneToday = false; n.countToday = 0; n.qtyToday = 0;
+      n.doneToday = false; n.countToday = 0; n.qtyToday = 0; n.penToday = 0;
       return n;
     });
+
+    goalList = advanceGoalSubgoals(goalList, list, daySuccess, cur);
 
     if (cur.getDay() === 6) {   // week closes Saturday night
       list = list.map((t) => {
@@ -173,7 +219,7 @@ function runRollover(tasks, fromKey, toKey) {
     }
     cur = addDays(cur, 1);
   }
-  return { tasks: list, penalties, rewards };
+  return { tasks: list, penalties, rewards, goals: goalList };
 }
 
 /* ==================== journey line with travel effects ==================== */
@@ -285,7 +331,12 @@ function JourneyLine({ points, target, animateFrom, onArrive }) {
 
 /* ============================== seed ============================== */
 const seedState = (todayKey) => ({
-  goals: [{ id: "g1", name: "The Goal", target: 1000, achieved: 240 }],
+  goals: [{
+    id: "g1", name: "The Goal", target: 1000, achieved: 240,
+    subgoals: [{
+      id: "sg1", title: "Workout + clean streak", taskIds: ["t1", "t7"], targetStreak: 7, currentStreak: 5, done: false,
+    }],
+  }],
   tasks: [
     { id: "t0", goalId: "g1", title: "Read the Principles", points: 25, kind: "do", mode: "simple", sched: "daily", createdKey: todayKey, fixed: true, richContent: "principles", note: "Ten bedrock principles, illustrated — tap to read the full set." },
     { id: "t1", goalId: "g1", title: "Morning workout", points: 40, kind: "do", mode: "simple", sched: "daily", createdKey: todayKey, streak: 5, note: "You've never regretted one once it's done. Future you is already thanking you." },
@@ -332,7 +383,7 @@ export default function TheGoalApp() {
     } catch { /* first run */ }
     const k = dayKey(logicalDate(new Date(), { dayEndHour: 3, dayEndMin: 0 }));
     if (!s) s = seedState(k);
-    setGoals(s.goals); setTasks(s.tasks); setSettings(s.settings);
+    setGoals(s.goals.map((g) => ({ ...g, subgoals: g.subgoals || [] }))); setTasks(s.tasks); setSettings(s.settings);
     setLastDayKey(s.lastDayKey); setDayOffset(s.dayOffset || 0); setVerseSeen(s.verseSeen || null);
     setActiveId(s.goals[0]?.id || "g1");
     setReady(true);
@@ -355,14 +406,14 @@ export default function TheGoalApp() {
   const goal = goals.find((g) => g.id === activeId) || goals[0];
   const gAll = goal ? tasks.filter((t) => t.goalId === goal.id && !t.completed) : [];
   const gToday = gAll.filter((t) => isDue(t, activeDay));
-  const todayPoints = gToday.reduce((s, t) => s + earned(t), 0);
+  const todayPoints = gToday.reduce((s, t) => s + earned(t, goal), 0);
   const atRisk = gToday.reduce((s, t) => s + riskPts(t), 0);
 
   const submitPreview = useMemo(() => {
     if (!pendingSubmit || !goal) return { pen: 0, rew: 0 };
-    const { penalties, rewards } = runRollover(JSON.parse(JSON.stringify(tasks)), lastDayKey, todayKey);
+    const { penalties, rewards } = runRollover(JSON.parse(JSON.stringify(tasks)), goals, lastDayKey, todayKey);
     return { pen: penalties[goal.id] || 0, rew: rewards[goal.id] || 0 };
-  }, [pendingSubmit, tasks, lastDayKey, todayKey, goal]);
+  }, [pendingSubmit, tasks, goals, lastDayKey, todayKey, goal]);
 
   const bump = (gid, d) => { if (d) setGoals((gs) => gs.map((g) => (g.id === gid ? { ...g, achieved: g.achieved + d } : g))); };
   const openJourney = () => setView("journey");
@@ -373,14 +424,15 @@ export default function TheGoalApp() {
 
   const submitDay = useCallback(() => {
     if (!pendingSubmit) return;
-    const { tasks: next, penalties, rewards } = runRollover(tasks, lastDayKey, todayKey);
+    const { tasks: next, penalties, rewards, goals: nextGoals } = runRollover(tasks, goals, lastDayKey, todayKey);
     setTasks(next);
     const before = {};
     setGoals((gs) => gs.map((g) => {
+      const updated = nextGoals.find((ng) => ng.id === g.id) || g;
       const pen = penalties[g.id] || 0;
       const rew = rewards[g.id] || 0;
       if (pen || rew) before[g.id] = g.achieved;
-      return { ...g, achieved: g.achieved + rew - pen };
+      return { ...updated, achieved: g.achieved + rew - pen };
     }));
     if (Object.keys(before).length) setMarch(before);
     setLastDayKey(todayKey);
@@ -390,7 +442,7 @@ export default function TheGoalApp() {
     if (totalRew > 0) parts.push(`+${totalRew} earned`);
     if (totalPen > 0) parts.push(`−${totalPen} shortfalls`);
     flash(parts.length ? `Day submitted · ${parts.join(" · ")}` : "Day submitted · slate is clean");
-  }, [pendingSubmit, tasks, lastDayKey, todayKey, flash]);
+  }, [pendingSubmit, tasks, goals, lastDayKey, todayKey, flash]);
 
   const showBurst = (delta) => {
     if (!delta) return;
@@ -401,7 +453,31 @@ export default function TheGoalApp() {
 
   const applyTask = (t, patch) => {
     const next = { ...t, ...patch };
-    const delta = earned(next) - earned(t);
+    let delta;
+    if (isPercentDont(t)) {
+      const before = violationUnits(t);
+      const after = violationUnits(next);
+      const g = goals.find((x) => x.id === t.goalId);
+      let penToday = t.penToday || 0;
+      delta = 0;
+      if (after > before) {
+        let ach = g?.achieved ?? 0;
+        for (let i = 0; i < after - before; i++) {
+          const hit = percentHit(t, ach);
+          delta -= hit;
+          ach -= hit;
+          penToday += hit;
+        }
+      } else if (after < before && before > 0) {
+        const restore = after === 0 ? penToday : Math.round(penToday * (before - after) / before);
+        delta += restore;
+        penToday = Math.max(0, penToday - restore);
+      }
+      next.penToday = penToday;
+    } else {
+      const g = goals.find((x) => x.id === t.goalId);
+      delta = earned(next, g) - earned(t, g);
+    }
     bump(t.goalId, delta);
     setTasks((ts) => ts.map((x) => (x.id === t.id ? next : x)));
     showBurst(delta);
@@ -409,12 +485,30 @@ export default function TheGoalApp() {
 
   const saveTask = (fields, existing) => {
     if (existing) {
+      const g = goals.find((x) => x.id === existing.goalId);
       const next = { ...existing, ...fields };
-      bump(existing.goalId, earned(next) - earned(existing));
+      if (!isPercentDont(next)) {
+        next.penaltyType = undefined;
+        next.penaltyPct = undefined;
+        next.penToday = undefined;
+        bump(existing.goalId, earned(next, g) - earned(existing, g));
+      } else {
+        const oldEarned = earned(existing, g);
+        let ach = (g?.achieved ?? 0) - oldEarned;
+        let pen = 0;
+        const u = violationUnits(next);
+        for (let i = 0; i < u; i++) {
+          const hit = percentHit(next, ach);
+          pen += hit;
+          ach -= hit;
+        }
+        next.penToday = pen;
+        bump(existing.goalId, (-pen) - oldEarned);
+      }
       setTasks((ts) => ts.map((x) => (x.id === existing.id ? next : x)));
       flash("Task updated");
     } else {
-      setTasks((ts) => [...ts, { note: "", fixed: false, ...fields, id: uid(), goalId: goal.id, createdKey: todayKey, doneToday: false, countToday: 0, qtyToday: 0, weekLog: 0, weekDue: 0, weekShort: 0, weekUnits: 0, streak: 0, completed: false }]);
+      setTasks((ts) => [...ts, { note: "", fixed: false, ...fields, id: uid(), goalId: goal.id, createdKey: todayKey, doneToday: false, countToday: 0, qtyToday: 0, weekLog: 0, weekDue: 0, weekShort: 0, weekUnits: 0, streak: 0, completed: false, penToday: 0 }]);
       flash("Task added");
     }
     setModal(null);
@@ -422,7 +516,14 @@ export default function TheGoalApp() {
 
   const delTask = (t) => {
     if (t.fixed) { flash("This task is fixed and can't be deleted"); return; }
-    bump(t.goalId, -earned(t)); setTasks((ts) => ts.filter((x) => x.id !== t.id)); setModal(null); flash("Task deleted");
+    const g = goals.find((x) => x.id === t.goalId);
+    bump(t.goalId, -earned(t, g));
+    setTasks((ts) => ts.filter((x) => x.id !== t.id));
+    setGoals((gs) => gs.map((g) => (g.id !== t.goalId ? g : {
+      ...g,
+      subgoals: (g.subgoals || []).map((sg) => ({ ...sg, taskIds: (sg.taskIds || []).filter((id) => id !== t.id) })),
+    })));
+    setModal(null); flash("Task deleted");
   };
 
   const moveTask = (t, dir, siblings) => {
@@ -441,8 +542,8 @@ export default function TheGoalApp() {
   };
 
   const saveGoal = (fields, existing) => {
-    if (existing) { setGoals((gs) => gs.map((g) => (g.id === existing.id ? { ...g, ...fields } : g))); flash("Goal updated"); }
-    else { const id = uid(); setGoals((gs) => [...gs, { id, ...fields, achieved: 0 }]); setActiveId(id); openJourney(); flash("New goal started"); }
+    if (existing) { setGoals((gs) => gs.map((g) => (g.id === existing.id ? { ...g, ...fields, subgoals: fields.subgoals ?? g.subgoals ?? [] } : g))); flash("Goal updated"); }
+    else { const id = uid(); setGoals((gs) => [...gs, { id, ...fields, achieved: 0, subgoals: [] }]); setActiveId(id); openJourney(); flash("New goal started"); }
     setModal(null);
   };
 
@@ -492,7 +593,10 @@ export default function TheGoalApp() {
           <div style={{ position: "absolute", top: 16, left: 18, right: 18, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <button onClick={() => setModal({ type: "goal", payload: goal })} style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer" }}>
               <div style={{ color: T.text, fontSize: 17, fontWeight: 500, display: "flex", alignItems: "center", gap: 6 }}>{goal.name} <Pencil size={13} color={T.dim} /></div>
-              <div style={{ color: T.muted, fontSize: 12.5, marginTop: 2 }}>{goal.achieved} / {goal.target} · {pct}%</div>
+              <div style={{ color: T.muted, fontSize: 12.5, marginTop: 2 }}>
+                {goal.achieved} / {goal.target} · {pct}%
+                {subgoalsTotal(goal) > 0 && ` · Streaks ${subgoalsDone(goal)}/${subgoalsTotal(goal)}`}
+              </div>
             </button>
             <div style={{ textAlign: "right" }}>
               <div style={{ background: T.card, border: `1px solid ${T.cardLine}`, borderRadius: 20, padding: "6px 13px", color: todayPoints < 0 ? T.red : T.blue, fontSize: 14, fontWeight: 600 }}>
@@ -561,7 +665,7 @@ export default function TheGoalApp() {
             </div>
 
             {["do", "better", "dont"].map((k) => (
-              <Group key={k} kind={k} tasks={gToday.filter((t) => t.kind === k)} onApply={applyTask} onEdit={(t) => setModal({ type: "task", payload: t })} />
+              <Group key={k} kind={k} tasks={gToday.filter((t) => t.kind === k)} goal={goal} onApply={applyTask} onEdit={(t) => setModal({ type: "task", payload: t })} />
             ))}
 
             {gAll.length > gToday.length && (
@@ -586,21 +690,40 @@ export default function TheGoalApp() {
           <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
             <Mini icon={<Flame size={15} />} v={gToday.filter((t) => met(t)).length} l="Met today" />
             <Mini icon={<Check size={15} />} v={gToday.length} l="Due today" />
-            <Mini icon={<Trophy size={15} />} v={goals.filter((g) => g.achieved >= g.target).length} l="Reached" />
+            <Mini icon={<Trophy size={15} />} v={goals.filter(goalReached).length} l="Reached" />
           </div>
           {goals.map((g) => {
             const p = clamp01(g.achieved / g.target), on = g.id === activeId;
+            const sgTotal = subgoalsTotal(g);
+            const sgDone = subgoalsDone(g);
+            const reached = goalReached(g);
             return (
-              <div key={g.id} onClick={() => { setActiveId(g.id); openJourney(); }} style={{ background: T.card, border: `1px solid ${on ? "rgba(59,156,255,.55)" : T.cardLine}`, borderRadius: 16, padding: 17, marginBottom: 11, cursor: "pointer", boxShadow: on ? "0 0 22px rgba(59,156,255,.15)" : "none" }}>
+              <div key={g.id} onClick={() => { setActiveId(g.id); openJourney(); }} style={{ background: T.card, border: `1px solid ${on ? "rgba(59,156,255,.55)" : reached ? "rgba(74,222,128,.35)" : T.cardLine}`, borderRadius: 16, padding: 17, marginBottom: 11, cursor: "pointer", boxShadow: on ? "0 0 22px rgba(59,156,255,.15)" : "none" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10 }}>
-                  <span style={{ color: T.text, fontSize: 17, fontWeight: 500, flex: 1, minWidth: 0 }}>{g.name}</span>
+                  <span style={{ color: T.text, fontSize: 17, fontWeight: 500, flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 7 }}>
+                    {reached && <Trophy size={15} color={T.green} style={{ flexShrink: 0 }} />}
+                    {g.name}
+                  </span>
                   <span style={{ color: g.achieved < 0 ? T.red : T.blue, fontSize: 14, fontWeight: 600 }}>{g.achieved} / {g.target}</span>
                   <button onClick={(e) => { e.stopPropagation(); setModal({ type: "goal", payload: g }); }} style={{ background: "none", border: "none", color: T.dim, cursor: "pointer", padding: 2, display: "flex" }}><Pencil size={15} /></button>
                 </div>
                 <div style={{ height: 5, background: "rgba(255,255,255,.09)", borderRadius: 4, overflow: "hidden" }}>
                   <div style={{ width: `${p * 100}%`, height: "100%", background: g.achieved < 0 ? T.red : `linear-gradient(90deg, ${T.blueDeep}, ${T.blueHi})`, boxShadow: `0 0 10px ${T.blue}`, transition: "width .5s" }} />
                 </div>
-                <div style={{ color: T.muted, fontSize: 12, marginTop: 9 }}>{Math.round(p * 100)}% · {tasks.filter((t) => t.goalId === g.id && !t.completed).length} tasks</div>
+                <div style={{ color: T.muted, fontSize: 12, marginTop: 9 }}>
+                  {Math.round(p * 100)}% · {tasks.filter((t) => t.goalId === g.id && !t.completed).length} tasks
+                  {sgTotal > 0 && <span style={{ color: sgDone === sgTotal ? T.green : T.amber }}> · Streaks {sgDone}/{sgTotal}</span>}
+                </div>
+                {sgTotal > 0 && (
+                  <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 5 }}>
+                    {(g.subgoals || []).map((sg) => (
+                      <div key={sg.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 11.5 }}>
+                        <span style={{ color: T.dim, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sg.title}</span>
+                        <span style={{ color: sg.done ? T.green : T.amber, fontWeight: 600, flexShrink: 0 }}>{sg.done ? "Done" : `${sg.currentStreak || 0}/${sg.targetStreak}`}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -621,8 +744,8 @@ export default function TheGoalApp() {
 
       {toast && <div style={{ position: "absolute", bottom: 88, left: "50%", transform: "translateX(-50%)", background: "rgba(20,30,48,.96)", border: `1px solid ${T.cardLine}`, color: T.text, padding: "11px 20px", borderRadius: 30, fontSize: 13, fontWeight: 500, animation: "pop .25s ease", whiteSpace: "nowrap", zIndex: 40 }}>{toast}</div>}
 
-      {modal?.type === "goal" && <GoalModal initial={modal.payload} onClose={() => setModal(null)} onSave={saveGoal} onDelete={delGoal} canDelete={goals.length > 1} />}
-      {modal?.type === "task" && <TaskModal goalName={goal.name} initial={modal.payload} onClose={() => setModal(null)} onSave={saveTask} onDelete={delTask} />}
+      {modal?.type === "goal" && <GoalModal initial={modal.payload} tasks={tasks} onClose={() => setModal(null)} onSave={saveGoal} onDelete={delGoal} canDelete={goals.length > 1} />}
+      {modal?.type === "task" && <TaskModal goalName={goal.name} goal={goal} initial={modal.payload} onClose={() => setModal(null)} onSave={saveTask} onDelete={delTask} />}
       {modal?.type === "order" && <OrderModal tasks={gAll} onMove={moveTask} onClose={() => setModal(null)} />}
       {modal?.type === "settings" && (
         <SettingsModal settings={settings} onChange={setSettings} onClose={() => setModal(null)}
@@ -634,7 +757,7 @@ export default function TheGoalApp() {
 }
 
 /* ============================== task list ============================== */
-function Group({ kind, tasks, onApply, onEdit }) {
+function Group({ kind, tasks, goal, onApply, onEdit }) {
   const meta = KIND[kind];
   return (
     <div style={{ marginBottom: 22 }}>
@@ -643,7 +766,7 @@ function Group({ kind, tasks, onApply, onEdit }) {
         <span style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>{meta.label}</span>
       </div>
       {tasks.length === 0 && <div style={{ color: T.dim, fontSize: 13, padding: "2px 2px 6px" }}>Nothing due today.</div>}
-      {tasks.map((t) => <Row key={t.id} t={t} onApply={onApply} onEdit={onEdit} />)}
+      {tasks.map((t) => <Row key={t.id} t={t} goal={goal} onApply={onApply} onEdit={onEdit} />)}
     </div>
   );
 }
@@ -664,17 +787,21 @@ function NumStepper({ value, onChange, min = 0, max = 9999, step = 1, compact, a
   );
 }
 
-function Row({ t, onApply, onEdit }) {
+function Row({ t, goal, onApply, onEdit }) {
   const [noteOpen, setNoteOpen] = useState(false);
   const meta = KIND[t.kind];
-  const val = earned(t);
+  const val = earned(t, goal);
   const active = val !== 0;
   const negKind = t.kind === "dont";
+  const pctDont = isPercentDont(t);
   const m = minOf(t);
   const weekly = t.sched === "custom" && (t.custom || {}).mode === "timesWk";
   const border = active ? (val < 0 ? "rgba(255,107,107,.45)" : "rgba(59,156,255,.3)") : T.cardLine;
   const hasNote = !!(t.note && t.note.trim());
   const isLongNote = hasNote && (t.note.length > 110 || t.note.includes("\n") || !!t.richContent);
+  const idlePts = negKind
+    ? (pctDont ? `−${dontPenaltyPct(t)}%` : `+${dontRewardValue(t)}`)
+    : `${t.points}`;
 
   return (
     <div style={{ background: T.card, border: `1px solid ${border}`, borderRadius: 14, padding: "12px 14px", marginBottom: 9 }}>
@@ -716,8 +843,8 @@ function Row({ t, onApply, onEdit }) {
           </div>
         </button>
 
-        <span style={{ color: val > 0 ? T.blue : val < 0 ? T.red : negKind ? T.green : T.muted, fontSize: 14, fontWeight: 700, flexShrink: 0 }}>
-          {val > 0 ? `+${val}` : val < 0 ? `${val}` : negKind ? `+${dontRewardValue(t)}` : `${t.points}`}
+        <span style={{ color: val > 0 ? T.blue : val < 0 ? T.red : negKind ? (pctDont ? T.red : T.green) : T.muted, fontSize: 14, fontWeight: 700, flexShrink: 0 }}>
+          {val > 0 ? `+${val}` : val < 0 ? `${val}` : idlePts}
         </span>
       </div>
 
@@ -1217,9 +1344,9 @@ function Mini({ icon, v, l }) {
 
 const inp = { width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${T.cardLine}`, borderRadius: 11, padding: "12px 14px", fontSize: 15, color: T.text, outline: "none" };
 
-function Shell({ title, onClose, children, footer }) {
+function Shell({ title, onClose, children, footer, zIndex = 30 }) {
   return (
-    <div style={{ position: "absolute", inset: 0, background: "rgba(3,7,14,.72)", backdropFilter: "blur(4px)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 30 }}>
+    <div style={{ position: "absolute", inset: 0, background: "rgba(3,7,14,.72)", backdropFilter: "blur(4px)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex }}>
       <div style={{ width: "100%", maxWidth: 460, background: T.bg2, border: `1px solid ${T.cardLine}`, borderRadius: "24px 24px 0 0", padding: 22, maxHeight: "92%", overflowY: "auto", animation: "pop .25s ease" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
           <span style={{ color: T.text, fontSize: 20, fontWeight: 500 }}>{title}</span>
@@ -1311,29 +1438,140 @@ function SettingsModal({ settings, onChange, onClose, onAdvance, onReset, todayL
   );
 }
 
-function GoalModal({ initial, onClose, onSave, onDelete, canDelete }) {
+function GoalModal({ initial, tasks, onClose, onSave, onDelete, canDelete }) {
   const [name, setName] = useState(initial?.name || "");
   const [target, setTarget] = useState(String(initial?.target || 1000));
+  const [subgoals, setSubgoals] = useState(initial?.subgoals || []);
+  const [subModal, setSubModal] = useState(null);
   const ok = name.trim().length > 0;
+  const dailyTasks = initial ? tasks.filter((t) => t.goalId === initial.id && t.sched === "daily" && !t.completed) : [];
+
+  const saveSubgoal = (fields, existing) => {
+    if (existing) {
+      setSubgoals((ss) => ss.map((s) => {
+        if (s.id !== existing.id) return s;
+        const merged = { ...s, ...fields };
+        return { ...merged, done: s.done || (merged.currentStreak || 0) >= (merged.targetStreak || 1) };
+      }));
+    } else {
+      setSubgoals((ss) => [...ss, { id: uid(), currentStreak: 0, done: false, ...fields }]);
+    }
+    setSubModal(null);
+  };
+
+  const deleteSubgoal = (sg) => setSubgoals((ss) => ss.filter((s) => s.id !== sg.id));
+
+  const taskLabel = (id) => dailyTasks.find((t) => t.id === id)?.title || "Removed task";
+
   return (
-    <Shell title={initial ? "Edit goal" : "New goal"} onClose={onClose} footer={
-      <>
-        <button onClick={() => ok && onSave({ name: name.trim(), target: Math.max(1, parseInt(target) || 1000) }, initial)} style={{ width: "100%", marginTop: 4, background: ok ? T.blue : "rgba(255,255,255,.08)", color: ok ? "#04101F" : T.dim, border: "none", borderRadius: 14, padding: "15px 0", fontSize: 15, fontWeight: 700, cursor: ok ? "pointer" : "default" }}>
-          {initial ? "Save changes" : "Create goal"}
-        </button>
-        {initial && canDelete && <button onClick={() => onDelete(initial)} style={dangerBtn}><Trash2 size={15} /> Delete goal and its tasks</button>}
-      </>}>
-      <Field label="Goal name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Learn Spanish" style={inp} /></Field>
-      <Field label="Target points"><input value={target} onChange={(e) => setTarget(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={inp} /></Field>
-      {initial && <div style={{ color: T.dim, fontSize: 11.5, marginTop: -6, lineHeight: 1.5 }}>Achieved points stay as they are — changing the target just moves the finish line.</div>}
+    <>
+      <Shell title={initial ? "Edit goal" : "New goal"} onClose={onClose} footer={
+        <>
+          <button onClick={() => ok && onSave({ name: name.trim(), target: Math.max(1, parseInt(target) || 1000), subgoals }, initial)} style={{ width: "100%", marginTop: 4, background: ok ? T.blue : "rgba(255,255,255,.08)", color: ok ? "#04101F" : T.dim, border: "none", borderRadius: 14, padding: "15px 0", fontSize: 15, fontWeight: 700, cursor: ok ? "pointer" : "default" }}>
+            {initial ? "Save changes" : "Create goal"}
+          </button>
+          {initial && canDelete && <button onClick={() => onDelete(initial)} style={dangerBtn}><Trash2 size={15} /> Delete goal and its tasks</button>}
+        </>}>
+        <Field label="Goal name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Learn Spanish" style={inp} /></Field>
+        <Field label="Target points"><input value={target} onChange={(e) => setTarget(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={inp} /></Field>
+        {initial && <div style={{ color: T.dim, fontSize: 11.5, marginTop: -6, lineHeight: 1.5 }}>Achieved points stay as they are — changing the target just moves the finish line.</div>}
+
+        {initial && (
+          <div style={{ marginTop: 20, paddingTop: 18, borderTop: `1px solid ${T.cardLine}` }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <div>
+                <div style={{ color: T.text, fontSize: 14, fontWeight: 600 }}>Streak requirements</div>
+                <div style={{ color: T.dim, fontSize: 11.5, marginTop: 3, lineHeight: 1.45 }}>Goal completes only when points and every streak here are met.</div>
+              </div>
+              <button onClick={() => setSubModal({ mode: "add" })} disabled={!dailyTasks.length} style={{ background: T.card, color: dailyTasks.length ? T.blueHi : T.dim, border: `1px solid ${T.cardLine}`, borderRadius: 10, padding: "8px 12px", fontSize: 12.5, fontWeight: 600, cursor: dailyTasks.length ? "pointer" : "default", display: "flex", alignItems: "center", gap: 5, opacity: dailyTasks.length ? 1 : 0.5 }}>
+                <Plus size={14} /> Add streak
+              </button>
+            </div>
+            {!dailyTasks.length && <div style={{ color: T.dim, fontSize: 12.5, lineHeight: 1.45 }}>Add daily tasks first — only daily tasks can count toward streaks.</div>}
+            {subgoals.length === 0 && dailyTasks.length > 0 && <div style={{ color: T.dim, fontSize: 12.5 }}>No streak requirements yet. Points alone will finish this goal.</div>}
+            {subgoals.map((sg) => (
+              <div key={sg.id} style={{ background: "rgba(255,255,255,.04)", border: `1px solid ${sg.done ? "rgba(74,222,128,.35)" : T.cardLine}`, borderRadius: 12, padding: "12px 14px", marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                      {sg.done && <Check size={14} color={T.green} style={{ flexShrink: 0 }} />}
+                      <span style={{ color: T.text, fontSize: 14, fontWeight: 600 }}>{sg.title}</span>
+                    </div>
+                    <div style={{ color: T.muted, fontSize: 11.5, marginTop: 5, lineHeight: 1.45 }}>
+                      {(sg.taskIds || []).map(taskLabel).join(" · ") || "No tasks linked"}
+                    </div>
+                    <div style={{ color: sg.done ? T.green : T.amber, fontSize: 12, fontWeight: 600, marginTop: 6 }}>
+                      {sg.done ? "Complete" : `${sg.currentStreak || 0} / ${sg.targetStreak} days`}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    <button onClick={() => setSubModal({ mode: "edit", payload: sg })} style={{ background: "none", border: "none", color: T.dim, cursor: "pointer", padding: 2, display: "flex" }}><Pencil size={15} /></button>
+                    <button onClick={() => deleteSubgoal(sg)} style={{ background: "none", border: "none", color: T.dim, cursor: "pointer", padding: 2, display: "flex" }}><Trash2 size={15} /></button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Shell>
+      {subModal && (
+        <SubgoalModal
+          initial={subModal.mode === "edit" ? subModal.payload : null}
+          dailyTasks={dailyTasks}
+          onClose={() => setSubModal(null)}
+          onSave={saveSubgoal}
+          zIndex={40}
+        />
+      )}
+    </>
+  );
+}
+
+function SubgoalModal({ initial, dailyTasks, onClose, onSave, zIndex }) {
+  const [title, setTitle] = useState(initial?.title || "");
+  const [targetStreak, setTargetStreak] = useState(String(initial?.targetStreak ?? 7));
+  const [taskIds, setTaskIds] = useState(initial?.taskIds || []);
+  const ok = title.trim().length > 0 && taskIds.length > 0 && (parseInt(targetStreak) || 0) >= 1;
+
+  const toggleTask = (id) => setTaskIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+
+  return (
+    <Shell title={initial ? "Edit streak" : "Add streak"} onClose={onClose} zIndex={zIndex} footer={
+      <button onClick={() => ok && onSave({ title: title.trim(), targetStreak: Math.max(1, parseInt(targetStreak) || 7), taskIds }, initial)} style={{ width: "100%", marginTop: 4, background: ok ? T.blue : "rgba(255,255,255,.08)", color: ok ? "#04101F" : T.dim, border: "none", borderRadius: 14, padding: "15px 0", fontSize: 15, fontWeight: 700, cursor: ok ? "pointer" : "default" }}>
+        {initial ? "Save streak" : "Add streak"}
+      </button>
+    }>
+      <Field label="Streak name"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Morning routine" style={inp} /></Field>
+      <Field label="Days required"><input value={targetStreak} onChange={(e) => setTargetStreak(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={inp} /></Field>
+      <Field label="Daily tasks (all must succeed)">
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {dailyTasks.map((t) => {
+            const on = taskIds.includes(t.id);
+            return (
+              <button key={t.id} type="button" onClick={() => toggleTask(t.id)} style={{ display: "flex", alignItems: "center", gap: 10, textAlign: "left", background: on ? "rgba(59,156,255,.12)" : "rgba(255,255,255,.04)", border: `1.5px solid ${on ? T.blue : T.cardLine}`, borderRadius: 11, padding: "11px 13px", cursor: "pointer" }}>
+                <div style={{ width: 20, height: 20, borderRadius: 6, border: `1.5px solid ${on ? T.blue : T.dim}`, background: on ? T.blue : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  {on && <Check size={13} color="#04101F" strokeWidth={3} />}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>{t.title}</div>
+                  <div style={{ color: T.muted, fontSize: 11, marginTop: 2 }}>{KIND[t.kind].label} · {(t.streak || 0) > 0 ? `${t.streak} day streak` : "no streak yet"}</div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ color: T.dim, fontSize: 11.5, marginTop: 8, lineHeight: 1.45 }}>Every selected task must succeed on the same day for the streak to advance.</div>
+      </Field>
     </Shell>
   );
 }
 
-function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
+function TaskModal({ goalName, goal, initial, onClose, onSave, onDelete }) {
   const [title, setTitle] = useState(initial?.title || "");
   const [points, setPoints] = useState(String(initial?.points ?? 20));
   const [rewardPts, setRewardPts] = useState(String(initial?.rewardPts ?? 10));
+  const [penaltyType, setPenaltyType] = useState(initial?.penaltyType === "percent" ? "percent" : "fixed");
+  const [penaltyPct, setPenaltyPct] = useState(String(initial?.penaltyPct ?? 10));
   const [unit, setUnit] = useState(initial?.unit || "min");
   const [minCount, setMinCount] = useState(String(initial?.minCount ?? 0));
   const [noteText, setNoteText] = useState(initial?.note || "");
@@ -1360,16 +1598,21 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
   const mc = Math.max(0, parseInt(minCount) || 0);
   const pv = Math.max(1, parseInt(points) || 10);
   const rv = Math.max(0, parseInt(rewardPts) || 0);
+  const pp = Math.max(0, Math.min(100, parseInt(penaltyPct) || 0));
   const showMin = mode === "repeat" && kind !== "dont";
   const isDont = kind === "dont";
+  const usePct = isDont && penaltyType === "percent";
+  const sampleHit = usePct ? percentHit({ penaltyPct: pp, penaltyType: "percent", kind: "dont" }, goal?.achieved ?? 0) : 0;
 
   const save = () => {
     if (!ok) return;
-    const t = { title: title.trim(), points: pv, kind: isFixed ? "do" : kind, mode, sched, note: noteText.trim() };
+    const t = { title: title.trim(), points: usePct ? Math.max(1, pv) : pv, kind: isFixed ? "do" : kind, mode, sched, note: noteText.trim() };
     if (isFixed) t.fixed = true;
     t.unit = mode === "count" ? (unit.trim() || "unit") : undefined;
     t.minCount = showMin ? mc : 0;
     t.rewardPts = isDont ? rv : undefined;
+    if (isDont && penaltyType === "percent") { t.penaltyType = "percent"; t.penaltyPct = pp; }
+    else { t.penaltyType = undefined; t.penaltyPct = undefined; }
     t.custom = sched === "custom"
       ? (cmode === "weekdays" ? { mode: "weekdays", days } : cmode === "everyN" ? { mode: "everyN", everyN: Math.max(1, parseInt(everyN) || 2) } : { mode: "timesWk", timesWk: Math.max(1, parseInt(timesWk) || 3) })
       : undefined;
@@ -1421,8 +1664,33 @@ function TaskModal({ goalName, initial, onClose, onSave, onDelete }) {
         </div>
       </Field>
 
+      {isDont && (
+        <Field label="Penalty type">
+          <div style={{ display: "flex", gap: 7 }}>
+            {seg("fixed", penaltyType, setPenaltyType, "Fixed pts")}
+            {seg("percent", penaltyType, setPenaltyType, "% of progress")}
+          </div>
+          <div style={{ color: T.dim, fontSize: 11.5, marginTop: 8, lineHeight: 1.45 }}>
+            {penaltyType === "fixed"
+              ? "Lose a fixed number of points when you do it."
+              : "Lose a % of your current goal progress when you do it."}
+          </div>
+        </Field>
+      )}
+
       <div style={{ display: "flex", gap: 12 }}>
-        <div style={{ flex: 1 }}><Field label={ptsLabel}><input value={points} onChange={(e) => setPoints(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={inp} /></Field></div>
+        {usePct ? (
+          <div style={{ flex: 1 }}>
+            <Field label={mode === "repeat" ? "% each time" : mode === "count" ? `% per ${unit || "unit"}` : "% if done"}>
+              <input value={penaltyPct} onChange={(e) => setPenaltyPct(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={inp} />
+            </Field>
+            <div style={{ color: T.dim, fontSize: 11.5, marginTop: -6, lineHeight: 1.45 }}>
+              Now ≈ −{sampleHit} pts ({pp || 0}% of {goal?.achieved ?? 0} achieved)
+            </div>
+          </div>
+        ) : (
+          <div style={{ flex: 1 }}><Field label={ptsLabel}><input value={points} onChange={(e) => setPoints(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={inp} /></Field></div>
+        )}
         {isDont && <div style={{ flex: 1 }}><Field label="Reward if avoided"><input value={rewardPts} onChange={(e) => setRewardPts(e.target.value.replace(/\D/g, ""))} inputMode="numeric" style={inp} /></Field></div>}
         {mode === "count" && <div style={{ flex: 1 }}><Field label="Unit"><input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="min, page, rep" style={inp} /></Field></div>}
         {showMin && <div style={{ flex: 1 }}><Field label="Minimum per day"><input value={minCount} onChange={(e) => setMinCount(e.target.value.replace(/\D/g, ""))} inputMode="numeric" placeholder="0 = none" style={inp} /></Field></div>}
