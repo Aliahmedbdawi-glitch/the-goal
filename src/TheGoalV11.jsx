@@ -7,7 +7,7 @@ const T = {
   card: "rgba(255,255,255,0.045)", cardLine: "rgba(255,255,255,0.09)",
   text: "#E9EFF9", muted: "#8496AE", dim: "#3E4A5C",
   blue: "#3B9CFF", blueHi: "#8FCBFF", blueDeep: "#1E6FD9",
-  red: "#FF6B6B", redHi: "#FFB4B4", green: "#4ADE80", amber: "#FFB347",
+  red: "#FF6B6B", redHi: "#FFB4B4", green: "#4ADE80", amber: "#FFB347", goldHi: "#FFD78A",
 };
 
 const PTS_PER_SCREEN = 100, DOT_STEP = 25, STAGE_STEP = 100, MARCH_MS = 2000;
@@ -100,6 +100,47 @@ const taskSuccess = (t) => (t.kind === "dont" ? !dontViolated(t) : met(t));
 const goalReached = (g) => g.achieved >= g.target && (!(g.subgoals || []).length || (g.subgoals || []).every((s) => s.done));
 const subgoalsDone = (g) => (g.subgoals || []).filter((s) => s.done).length;
 const subgoalsTotal = (g) => (g.subgoals || []).length;
+const subgoalRatio = (sg) => (sg.done ? 1 : clamp01((sg.currentStreak || 0) / Math.max(1, sg.targetStreak || 1)));
+const streakProgress = (g) => {
+  const sgs = g.subgoals || [];
+  if (!sgs.length) return 0;
+  return sgs.reduce((s, sg) => s + subgoalRatio(sg), 0) / sgs.length;
+};
+const streakRightLabel = (g) => {
+  const sgs = g.subgoals || [];
+  const done = subgoalsDone(g);
+  const total = subgoalsTotal(g);
+  if (done === total) return `${done}/${total} done`;
+  if (total === 1) {
+    const sg = sgs[0];
+    return sg.done ? "Done" : `${sg.currentStreak || 0}/${sg.targetStreak} days`;
+  }
+  return `${done}/${total} done`;
+};
+
+function GoalMeter({ label, right, pct, tone, size = "main" }) {
+  const h = size === "main" ? 5 : 2;
+  const labelSize = size === "main" ? 11.5 : 10;
+  const fill = tone === "red"
+    ? { bg: T.red, glow: T.red }
+    : tone === "green"
+      ? { bg: `linear-gradient(90deg, #22C55E, ${T.green})`, glow: T.green }
+      : tone === "gold"
+        ? { bg: `linear-gradient(90deg, ${T.amber}, ${T.goldHi})`, glow: T.amber }
+        : { bg: `linear-gradient(90deg, ${T.blueDeep}, ${T.blueHi})`, glow: T.blue };
+  const rightColor = tone === "red" ? T.red : tone === "green" ? T.green : tone === "gold" ? T.amber : T.blue;
+  return (
+    <div style={{ marginTop: size === "main" ? 0 : 6 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: size === "main" ? 5 : 3, gap: 8 }}>
+        <span style={{ color: T.dim, fontSize: labelSize, fontWeight: 500 }}>{label}</span>
+        <span style={{ color: rightColor, fontSize: labelSize, fontWeight: 600, flexShrink: 0 }}>{right}</span>
+      </div>
+      <div style={{ height: h, background: "rgba(255,255,255,.09)", borderRadius: h, overflow: "hidden" }}>
+        <div style={{ width: `${clamp01(pct) * 100}%`, height: "100%", background: fill.bg, boxShadow: size === "main" ? `0 0 8px ${fill.glow}` : `0 0 5px ${fill.glow}`, transition: "width .5s" }} />
+      </div>
+    </div>
+  );
+}
 
 function advanceGoalSubgoals(goalList, list, daySuccess, cur) {
   return goalList.map((g) => ({
@@ -595,8 +636,18 @@ export default function TheGoalApp() {
               <div style={{ color: T.text, fontSize: 17, fontWeight: 500, display: "flex", alignItems: "center", gap: 6 }}>{goal.name} <Pencil size={13} color={T.dim} /></div>
               <div style={{ color: T.muted, fontSize: 12.5, marginTop: 2 }}>
                 {goal.achieved} / {goal.target} · {pct}%
-                {subgoalsTotal(goal) > 0 && ` · Streaks ${subgoalsDone(goal)}/${subgoalsTotal(goal)}`}
               </div>
+              {subgoalsTotal(goal) > 0 && (
+                <div style={{ marginTop: 6, maxWidth: 140 }}>
+                  <GoalMeter
+                    label="Streak"
+                    right={streakRightLabel(goal)}
+                    pct={streakProgress(goal)}
+                    tone={subgoalsDone(goal) === subgoalsTotal(goal) ? "green" : "gold"}
+                    size="streak"
+                  />
+                </div>
+              )}
             </button>
             <div style={{ textAlign: "right" }}>
               <div style={{ background: T.card, border: `1px solid ${T.cardLine}`, borderRadius: 20, padding: "6px 13px", color: todayPoints < 0 ? T.red : T.blue, fontSize: 14, fontWeight: 600 }}>
@@ -707,21 +758,37 @@ export default function TheGoalApp() {
                   <span style={{ color: g.achieved < 0 ? T.red : T.blue, fontSize: 14, fontWeight: 600 }}>{g.achieved} / {g.target}</span>
                   <button onClick={(e) => { e.stopPropagation(); setModal({ type: "goal", payload: g }); }} style={{ background: "none", border: "none", color: T.dim, cursor: "pointer", padding: 2, display: "flex" }}><Pencil size={15} /></button>
                 </div>
-                <div style={{ height: 5, background: "rgba(255,255,255,.09)", borderRadius: 4, overflow: "hidden" }}>
-                  <div style={{ width: `${p * 100}%`, height: "100%", background: g.achieved < 0 ? T.red : `linear-gradient(90deg, ${T.blueDeep}, ${T.blueHi})`, boxShadow: `0 0 10px ${T.blue}`, transition: "width .5s" }} />
-                </div>
-                <div style={{ color: T.muted, fontSize: 12, marginTop: 9 }}>
-                  {Math.round(p * 100)}% · {tasks.filter((t) => t.goalId === g.id && !t.completed).length} tasks
-                  {sgTotal > 0 && <span style={{ color: sgDone === sgTotal ? T.green : T.amber }}> · Streaks {sgDone}/{sgTotal}</span>}
+                <GoalMeter label="Points" right={`${Math.round(p * 100)}%`} pct={p} tone={g.achieved < 0 ? "red" : "blue"} size="main" />
+                {sgTotal > 0 && (
+                  <GoalMeter
+                    label={sgTotal === 1 ? "Streak" : "Streaks"}
+                    right={streakRightLabel(g)}
+                    pct={streakProgress(g)}
+                    tone={sgDone === sgTotal ? "green" : "gold"}
+                    size="streak"
+                  />
+                )}
+                <div style={{ color: T.muted, fontSize: 12, marginTop: 8 }}>
+                  {tasks.filter((t) => t.goalId === g.id && !t.completed).length} tasks
                 </div>
                 {sgTotal > 0 && (
-                  <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 5 }}>
-                    {(g.subgoals || []).map((sg) => (
-                      <div key={sg.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 11.5 }}>
-                        <span style={{ color: T.dim, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sg.title}</span>
-                        <span style={{ color: sg.done ? T.green : T.amber, fontWeight: 600, flexShrink: 0 }}>{sg.done ? "Done" : `${sg.currentStreak || 0}/${sg.targetStreak}`}</span>
-                      </div>
-                    ))}
+                  <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 7 }}>
+                    {(g.subgoals || []).map((sg) => {
+                      const ratio = subgoalRatio(sg);
+                      return (
+                        <div key={sg.id}>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 11.5 }}>
+                            <span style={{ color: T.dim, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sg.title}</span>
+                            <span style={{ color: sg.done ? T.green : T.amber, fontWeight: 600, flexShrink: 0 }}>{sg.done ? "Done" : `${sg.currentStreak || 0}/${sg.targetStreak}`}</span>
+                          </div>
+                          {!sg.done && (
+                            <div style={{ height: 2, background: "rgba(255,255,255,.07)", borderRadius: 2, overflow: "hidden", marginTop: 4 }}>
+                              <div style={{ width: `${ratio * 100}%`, height: "100%", background: `linear-gradient(90deg, ${T.amber}, ${T.goldHi})`, boxShadow: `0 0 4px ${T.amber}`, transition: "width .5s" }} />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
